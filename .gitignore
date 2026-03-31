@@ -47,3 +47,4 @@ report/*.run.xml
 report/*.snm
 report/*.synctex.gz
 report/*.toc
+report/*.xdv
