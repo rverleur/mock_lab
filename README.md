@@ -12,7 +12,8 @@ This repository has been reorganized into a GitHub-friendly structure without im
 
 ## Handout TODO
 
-- [ ] Review the provided baseline, etalon, and shock datasets and confirm the detector and TTL reference channels available in each file.
+- [ ] Review the provided baseline, etalon, and shock datasets and confirm 
+  the detector and TTL reference channels available in each file.
 - [ ] Implement MAT-file loading and a consistent path/config setup for the three experiments.
 - [ ] Build the etalon-processing workflow shown in the handout: identify usable peaks, handle scan turnaround, and map scan time to relative frequency with a polynomial fit.
 - [ ] Build the baseline-processing workflow so the no-CO experiment can be reused for emission subtraction and laser-intensity correction.

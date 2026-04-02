@@ -15,5 +15,6 @@ Suggested order while building the project:
 3. `run_shock_snapshot.py`
 4. `run_time_history.py`
 5. `run_full_pipeline.py`
+6. `run_report_figures.py`
 
 Right now the wrappers call placeholder pipeline functions that intentionally raise `NotImplementedError`.
