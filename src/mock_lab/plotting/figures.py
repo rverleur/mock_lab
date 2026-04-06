@@ -251,3 +251,34 @@ def plot_voigt_fit(
     if residual_limits is not None:
         residual_ax.set_ylim(*residual_limits)
     return fig
+
+
+def plot_state_history(
+    scan_index: Array1D,
+    temperature_k: Array1D,
+    pressure_atm: Array1D,
+    co_mole_fraction: Array1D,
+) -> Figure:
+    """Plot scan-by-scan temperature, pressure, and CO mole fraction."""
+
+    _configure_report_style()
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=(7.0, 7.2),
+        constrained_layout=True,
+        sharex=True,
+    )
+    ax_temperature, ax_pressure, ax_mole_fraction = axes
+
+    ax_temperature.plot(scan_index, temperature_k, color="tab:red", linewidth=1.4)
+    ax_temperature.set_ylabel("Temperature [K]")
+
+    ax_pressure.plot(scan_index, pressure_atm, color="tab:blue", linewidth=1.4)
+    ax_pressure.set_ylabel("Pressure [atm]")
+
+    ax_mole_fraction.plot(scan_index, co_mole_fraction, color="tab:green", linewidth=1.4)
+    ax_mole_fraction.set_ylabel("CO Mole Fraction [-]")
+    ax_mole_fraction.set_xlabel("Scan Index [-]")
+
+    return fig
