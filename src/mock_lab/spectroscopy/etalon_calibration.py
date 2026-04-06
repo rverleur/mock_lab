@@ -21,7 +21,7 @@ Index1D = NDArray[np.int64]
 
 @dataclass(frozen=True)
 class EtalonFit:
-    """Second-order time-to-relative-wavenumber calibration."""
+    """Polynomial time-to-relative-wavenumber calibration."""
 
     coefficients: Array1D
     time_axis_s: Array1D
@@ -29,6 +29,7 @@ class EtalonFit:
     peak_indices: Index1D
     peak_time_s: Array1D
     peak_wavenumber_cm_inv: Array1D
+    peak_residual_cm_inv: Array1D
     rms_residual_cm_inv: float
 
 
@@ -87,8 +88,11 @@ def fit_relative_wavenumber(
     peak_wavenumber_cm_inv = -fsr_cm_inv * np.arange(peak_indices.size, dtype=float)
     coefficients = np.polyfit(peak_time_s, peak_wavenumber_cm_inv, polynomial_order)
     relative_wavenumber_cm_inv = evaluate_relative_wavenumber(time_axis_s, coefficients)
-    residuals = peak_wavenumber_cm_inv - evaluate_relative_wavenumber(peak_time_s, coefficients)
-    rms_residual_cm_inv = float(np.sqrt(np.mean(residuals**2)))
+    peak_residual_cm_inv = peak_wavenumber_cm_inv - evaluate_relative_wavenumber(
+        peak_time_s,
+        coefficients,
+    )
+    rms_residual_cm_inv = float(np.sqrt(np.mean(peak_residual_cm_inv**2)))
 
     return EtalonFit(
         coefficients=np.asarray(coefficients, dtype=float),
@@ -97,6 +101,7 @@ def fit_relative_wavenumber(
         peak_indices=np.asarray(peak_indices, dtype=np.int64),
         peak_time_s=np.asarray(peak_time_s, dtype=float),
         peak_wavenumber_cm_inv=np.asarray(peak_wavenumber_cm_inv, dtype=float),
+        peak_residual_cm_inv=np.asarray(peak_residual_cm_inv, dtype=float),
         rms_residual_cm_inv=rms_residual_cm_inv,
     )
 
@@ -119,6 +124,7 @@ def save_etalon_fit(
         peak_indices=fit.peak_indices,
         peak_time_s=fit.peak_time_s,
         peak_wavenumber_cm_inv=fit.peak_wavenumber_cm_inv,
+        peak_residual_cm_inv=fit.peak_residual_cm_inv,
         rms_residual_cm_inv=fit.rms_residual_cm_inv,
         representative_sweep=representative_sweep,
         plot_sweep=plot_sweep,
@@ -143,5 +149,6 @@ def load_etalon_fit(path: Path | str) -> EtalonFit:
             peak_indices=np.asarray(data["peak_indices"], dtype=np.int64),
             peak_time_s=np.asarray(data["peak_time_s"], dtype=float),
             peak_wavenumber_cm_inv=np.asarray(data["peak_wavenumber_cm_inv"], dtype=float),
+            peak_residual_cm_inv=np.asarray(data["peak_residual_cm_inv"], dtype=float),
             rms_residual_cm_inv=float(data["rms_residual_cm_inv"]),
         )

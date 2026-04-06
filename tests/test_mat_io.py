@@ -12,6 +12,7 @@ from mock_lab.spectroscopy.absorbance import (
     beer_lambert_absorbance,
     find_analysis_window,
     fit_edge_line,
+    scale_sweeps_to_reference_peak,
     subtract_edge_line,
 )
 
@@ -52,21 +53,37 @@ def test_subtract_edge_line_removes_linear_background() -> None:
     assert corrected[64] > 0.9
 
 
-def test_absorbance_uses_positive_ratio_and_window_stops_at_peak() -> None:
-    baseline = np.linspace(0.2, 1.6, 80)
+def test_absorbance_uses_positive_ratio_and_window_uses_baseline_voltage_limits() -> None:
+    baseline = np.linspace(0.2, 3.2, 80)
     shock = baseline.copy()
     shock[32:50] *= 0.8
     shock[50:65] *= np.linspace(0.8, 1.0, 15)
 
     window = find_analysis_window(
         baseline,
-        shock,
         start_index=32,
         minimum_reference_signal=1.0,
+        maximum_reference_signal=2.75,
     )
     absorbance = beer_lambert_absorbance(baseline[window], shock[window])
 
-    assert window.start > 32
-    assert window.stop == 80
+    assert window.start >= 32
+    assert window.stop < 80
+    assert baseline[window.start] >= 1.0
+    assert np.all(baseline[window] <= 2.75)
     assert np.nanmax(absorbance) > 0.0
-    assert np.isclose(absorbance[-1], 0.0)
+
+
+def test_scale_sweeps_to_reference_peak_matches_peak_height() -> None:
+    reference = np.array([0.0, 1.0, 3.0, 2.0])
+    sweeps = np.array(
+        [
+            [0.0, 0.5, 1.5, 1.0],
+            [0.0, 2.0, 4.0, 1.0],
+        ]
+    )
+
+    scaled_sweeps, scale_factors = scale_sweeps_to_reference_peak(reference, sweeps)
+
+    assert np.allclose(np.max(scaled_sweeps, axis=1), np.max(reference))
+    assert np.all(scale_factors > 0.0)

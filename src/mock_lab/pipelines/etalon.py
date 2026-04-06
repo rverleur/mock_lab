@@ -34,7 +34,19 @@ class EtalonPipelineResult:
 
     fit: EtalonFit
     corrected_sweeps: Array2D
+    representative_sweep: NDArray[np.float64]
     plot_sweep_index: int
+
+
+def _ordinal_label(value: int) -> str:
+    """Format a small positive integer as an ordinal label."""
+
+    if 10 <= value % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(value % 10, "th")
+
+    return f"{value}{suffix}"
 
 
 def run_etalon_pipeline(
@@ -42,9 +54,9 @@ def run_etalon_pipeline(
     output_dir: Path | str,
     plot_sweep_index: int = 0,
     figure_output_dir: Path | str | None = None,
-    polynomial_order: int = 2,
+    polynomial_order: int = 4,
 ) -> EtalonPipelineResult:
-    """Fit a 2nd-order relative-wavenumber calibration from etalon data.
+    """Fit a polynomial relative-wavenumber calibration from etalon data.
 
     The calibration is built from a representative sweep obtained by averaging
     all phase-aligned etalon ramps after removing their edge baseline.
@@ -61,14 +73,12 @@ def run_etalon_pipeline(
     corrected_sweeps = remove_edge_baseline(sweeps.signal)
     representative_sweep = build_representative_sweep(corrected_sweeps)
     peak_indices = find_etalon_peaks(representative_sweep)
-    # The handout asks for a polynomial fit to the etalon peaks but does not
-    # specify the order, and the bundled MATLAB example code does not include
-    # etalon calibration. Keep the current second-order fit for now.
     fit = fit_relative_wavenumber(
         sweeps.time_axis_s,
         peak_indices,
         polynomial_order=polynomial_order,
     )
+    display_time_axis_s = sweeps.time_axis_s - sweeps.time_axis_s[0]
 
     clamped_index = int(np.clip(plot_sweep_index, 0, corrected_sweeps.shape[0] - 1))
     plot_sweep = corrected_sweeps[clamped_index]
@@ -81,19 +91,22 @@ def run_etalon_pipeline(
     )
 
     sweep_figure = plot_single_sweep(
-        sweeps.time_axis_s,
-        plot_sweep,
+        display_time_axis_s,
+        representative_sweep,
         peak_indices=peak_indices,
-        signal_label="Etalon sweep",
+        signal_label="Average etalon sweep",
+        peak_label="Average etalon peaks",
     )
     save_figure(sweep_figure, figure_output_dir / "etalon_sweep.png")
     plt.close(sweep_figure)
 
     calibration_figure = plot_etalon_calibration(
-        sweeps.time_axis_s,
+        display_time_axis_s,
         fit.peak_indices,
         fit.peak_wavenumber_cm_inv,
         fit.relative_wavenumber_cm_inv,
+        fit.peak_residual_cm_inv,
+        fit_label=f"{_ordinal_label(polynomial_order)}-order fit",
     )
     save_figure(calibration_figure, figure_output_dir / "etalon_calibration.png")
     plt.close(calibration_figure)
@@ -101,5 +114,6 @@ def run_etalon_pipeline(
     return EtalonPipelineResult(
         fit=fit,
         corrected_sweeps=corrected_sweeps,
+        representative_sweep=representative_sweep,
         plot_sweep_index=clamped_index,
     )

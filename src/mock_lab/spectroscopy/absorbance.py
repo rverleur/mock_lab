@@ -72,25 +72,40 @@ def subtract_edge_lines(sweeps: Array2D, edge_samples: int = 32) -> Array2D:
     return sweeps - fit_edge_lines(sweeps, edge_samples=edge_samples)
 
 
+def scale_sweeps_to_reference_peak(
+    reference_signal: Array1D,
+    sweeps: Array2D,
+) -> tuple[Array2D, Array1D]:
+    """Scale each sweep so its peak matches the peak of the reference signal."""
+
+    reference_peak = float(np.max(reference_signal))
+
+    if reference_peak <= 0.0:
+        raise ValueError("Reference signal must have a positive peak for scaling.")
+
+    sweep_peaks = np.max(sweeps, axis=1)
+    scale_factors = np.ones_like(sweep_peaks)
+    positive_mask = sweep_peaks > 0.0
+    scale_factors[positive_mask] = reference_peak / sweep_peaks[positive_mask]
+    return sweeps * scale_factors[:, np.newaxis], scale_factors
+
+
 def find_analysis_window(
     reference_signal: Array1D,
-    transmitted_signal: Array1D,
     start_index: int = 32,
     minimum_reference_signal: float = 1.0,
+    maximum_reference_signal: float = 2.75,
 ) -> slice:
     """Select the absorbance-analysis window on a corrected sweep.
 
     The window begins at the first sample, at or after `start_index`, where the
     corrected baseline/reference signal reaches `minimum_reference_signal`. It
-    ends at the peak of the corrected transmitted signal so the falling edge is
-    excluded from the absorbance plot.
+    ends immediately before the corrected baseline rises above
+    `maximum_reference_signal`.
     """
 
-    if reference_signal.ndim != 1 or transmitted_signal.ndim != 1:
-        raise ValueError("Window detection expects 1D signals.")
-
-    if reference_signal.shape != transmitted_signal.shape:
-        raise ValueError("Reference and transmitted signals must have the same shape.")
+    if reference_signal.ndim != 1:
+        raise ValueError("Window detection expects a 1D reference signal.")
 
     if not 0 <= start_index < reference_signal.size:
         raise ValueError("The requested start index must lie within the signal.")
@@ -101,8 +116,14 @@ def find_analysis_window(
         raise ValueError("Reference signal never reaches the requested minimum level.")
 
     window_start = start_index + int(threshold_indices[0])
-    peak_index = window_start + int(np.argmax(transmitted_signal[window_start:]))
-    return slice(window_start, peak_index + 1)
+    upper_indices = np.flatnonzero(reference_signal[window_start:] > maximum_reference_signal)
+
+    if upper_indices.size == 0:
+        window_stop = reference_signal.size
+    else:
+        window_stop = window_start + int(upper_indices[0])
+
+    return slice(window_start, window_stop)
 
 
 def beer_lambert_absorbance(reference_signal: Array1D, transmitted_signal: Array1D) -> Array1D:

@@ -110,29 +110,54 @@ def plot_etalon_calibration(
     peak_indices: NDArray[np.int64],
     peak_wavenumber_cm_inv: Array1D,
     fitted_wavenumber_cm_inv: Array1D,
+    peak_residual_cm_inv: Array1D,
+    fit_label: str = "Polynomial fit",
+    peak_label: str = "Average etalon peaks",
+    time_limits_us: tuple[float, float] = (0.5, 3.0),
+    residual_limits_cm_inv: tuple[float, float] = (-1.0e-3, 1.0e-3),
 ) -> Figure:
-    """Plot detected etalon peak locations and the polynomial calibration."""
+    """Plot the etalon calibration with a residual panel underneath."""
 
-    fig, ax = _new_figure()
+    _configure_report_style()
+    fig, (ax, residual_ax) = plt.subplots(
+        2,
+        1,
+        figsize=(7.0, 5.0),
+        constrained_layout=True,
+        sharex=True,
+        gridspec_kw={"height_ratios": [4.0, 1.1]},
+    )
     time_us = 1.0e6 * time_s
     ax.plot(
         time_us,
         fitted_wavenumber_cm_inv,
         linewidth=1.8,
         color="black",
-        label="2nd-order fit",
+        label=fit_label,
     )
     ax.scatter(
         time_us[peak_indices],
         peak_wavenumber_cm_inv,
         s=28,
         c="tab:red",
-        label="Etalon peaks",
+        label=peak_label,
         zorder=3,
     )
-    ax.set_xlabel(r"Time [$\mu$s]")
     ax.set_ylabel(r"Relative Wavenumber [cm$^{-1}$]")
     ax.legend(frameon=False)
+    ax.set_xlim(*time_limits_us)
+
+    residual_ax.axhline(0.0, linewidth=1.2, color="black")
+    residual_ax.scatter(
+        time_us[peak_indices],
+        peak_residual_cm_inv,
+        s=24,
+        c="tab:red",
+        zorder=3,
+    )
+    residual_ax.set_xlabel(r"Time [$\mu$s]")
+    residual_ax.set_ylabel(r"Residual [cm$^{-1}$]")
+    residual_ax.set_ylim(*residual_limits_cm_inv)
     return fig
 
 
@@ -150,4 +175,79 @@ def plot_frequency_domain_sweep(
     ax.set_xlabel(r"Relative Wavenumber [cm$^{-1}$]")
     ax.set_ylabel(ylabel)
     ax.legend(frameon=False)
+    return fig
+
+
+def plot_voigt_fit(
+    relative_wavenumber_cm_inv: Array1D,
+    absorbance: Array1D,
+    fitted_absorbance: Array1D,
+    component_absorbance: NDArray[np.float64],
+    *,
+    component_labels: tuple[str, ...],
+    absorbance_limits: tuple[float, float] | None = None,
+    residual_limits: tuple[float, float] | None = None,
+    annotation_text: str | None = None,
+) -> Figure:
+    """Plot measured absorbance, the total Voigt fit, and residuals."""
+
+    _configure_report_style()
+    fig, (ax, residual_ax) = plt.subplots(
+        2,
+        1,
+        figsize=(7.0, 5.0),
+        constrained_layout=True,
+        sharex=True,
+        gridspec_kw={"height_ratios": [4.0, 1.2]},
+    )
+    ax.plot(
+        relative_wavenumber_cm_inv,
+        absorbance,
+        color="black",
+        linewidth=1.8,
+        label="Measured absorbance",
+    )
+    ax.plot(
+        relative_wavenumber_cm_inv,
+        fitted_absorbance,
+        color="tab:red",
+        linewidth=1.8,
+        linestyle="--",
+        label="Voigt fit",
+    )
+
+    for component_signal, component_label in zip(component_absorbance, component_labels):
+        ax.plot(
+            relative_wavenumber_cm_inv,
+            component_signal,
+            linewidth=1.2,
+            label=component_label,
+        )
+
+    ax.set_ylabel("Absorbance [-]")
+    if absorbance_limits is not None:
+        ax.set_ylim(*absorbance_limits)
+    ax.legend(frameon=False, ncol=2)
+    if annotation_text is not None:
+        ax.text(
+            0.985,
+            0.97,
+            annotation_text,
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            bbox={"facecolor": "white", "edgecolor": "0.75", "alpha": 0.9},
+        )
+
+    residual_ax.axhline(0.0, linewidth=1.0, color="black")
+    residual_ax.plot(
+        relative_wavenumber_cm_inv,
+        absorbance - fitted_absorbance,
+        color="tab:blue",
+        linewidth=1.4,
+    )
+    residual_ax.set_xlabel(r"Relative Wavenumber [cm$^{-1}$]")
+    residual_ax.set_ylabel("Residual [-]")
+    if residual_limits is not None:
+        residual_ax.set_ylim(*residual_limits)
     return fig
