@@ -1,4 +1,4 @@
-"""Helpers for reading local HITRAN TIPS partition sums."""
+"""Helpers for reading vendored HITRAN TIPS partition sums."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import numpy as np
 
 
 def _tips_root() -> Path:
-    """Return the repository-local TIPS directory."""
+    """Return the repository-local vendored TIPS directory."""
 
-    return Path(__file__).resolve().parents[3] / "data" / "TIPS"
+    return Path(__file__).resolve().parents[3] / "third_party" / "hitran_tips"
 
 
 @lru_cache(maxsize=1)

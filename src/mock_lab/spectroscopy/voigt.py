@@ -9,6 +9,8 @@ from numpy.typing import NDArray
 from scipy.optimize import least_squares
 from scipy.special import voigt_profile
 
+from mock_lab.spectroscopy.tips import get_co_partition_sum
+
 
 Array1D = NDArray[np.float64]
 Array2D = NDArray[np.float64]
@@ -19,6 +21,7 @@ AVOGADRO_NUMBER = 6.02214076e23
 LIGHT_SPEED_M_S = 299792458.0
 CO_MOLAR_MASS_KG_MOL = 28.0101e-3
 CO_MOLECULAR_MASS_KG = CO_MOLAR_MASS_KG_MOL / AVOGADRO_NUMBER
+SECOND_RADIATION_CONSTANT_CM_K = 1.438776877
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,8 @@ class Transition:
     n_co: float
 
 
+# These three transitions are the handout-provided spectroscopic constants used
+# throughout the current fitting and state-reduction workflow.
 DEFAULT_CO_TRANSITIONS: tuple[Transition, ...] = (
     Transition(
         label="P(0,31)",
@@ -73,9 +78,16 @@ DEFAULT_CO_TRANSITIONS: tuple[Transition, ...] = (
 class VoigtFitParameters:
     """Physical and nuisance parameters for one fitted spectrum.
 
-    This matches the MATLAB demo structure more closely:
-    each line center, collisional width, and integrated area is a free
-    parameter, while all transitions share one Doppler temperature.
+    The stored result is always expanded into explicit per-line centers,
+    collisional widths, and integrated areas even though the optimizer now
+    uses a constrained internal parameterization:
+
+    - `P(0,31)` is the anchor line and is forced to remain the strongest line
+    - `P(3,14)` stays at a fixed center offset from `P(0,31)`
+    - `P(3,14)` shares its collisional width with `P(2,20)`
+    - the three integrated areas are tied together by temperature-dependent
+      line-strength ratios, so only the strongest-line area is fitted freely
+    - all three transitions still share one Doppler temperature
     """
 
     temperature_k: float
@@ -115,6 +127,58 @@ def transition_relative_offsets(
 
     centers = np.asarray([transition.center_cm_inv for transition in transitions], dtype=float)
     return centers - centers[anchor_index]
+
+
+def co_partition_function_ratio(temperature_k: float) -> float:
+    """Return the CO partition-function ratio Q(T)/Q(T_ref)."""
+
+    return float(get_co_partition_sum(float(temperature_k)) / get_co_partition_sum(float(T_REF_K)))
+
+
+def line_strength_at_temperature(
+    temperature_k: float,
+    transition: Transition,
+) -> float:
+    """Return the temperature-scaled integrated line strength for one transition."""
+
+    partition_ratio = co_partition_function_ratio(temperature_k)
+    stimulated_emission_ratio = (
+        1.0
+        - np.exp(-SECOND_RADIATION_CONSTANT_CM_K * transition.center_cm_inv / temperature_k)
+    ) / (
+        1.0
+        - np.exp(-SECOND_RADIATION_CONSTANT_CM_K * transition.center_cm_inv / T_REF_K)
+    )
+    lower_state_ratio = np.exp(
+        -SECOND_RADIATION_CONSTANT_CM_K
+        * transition.lower_state_energy_cm_inv
+        * (1.0 / temperature_k - 1.0 / T_REF_K)
+    )
+    return float(
+        transition.line_strength_ref
+        * (1.0 / partition_ratio)
+        * lower_state_ratio
+        * stimulated_emission_ratio
+    )
+
+
+def transition_strength_ratios(
+    temperature_k: float,
+    transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
+    anchor_index: int = 0,
+) -> Array1D:
+    """Return temperature-dependent integrated-area ratios relative to the anchor line."""
+
+    strengths = np.asarray(
+        [line_strength_at_temperature(float(temperature_k), transition) for transition in transitions],
+        dtype=float,
+    )
+    anchor_strength = float(strengths[anchor_index])
+
+    if not np.isfinite(anchor_strength) or anchor_strength <= 0.0:
+        raise ValueError("Anchor transition line strength must remain positive.")
+
+    return strengths / anchor_strength
 
 
 def doppler_sigma_cm_inv(center_cm_inv: float, temperature_k: float) -> float:
@@ -217,7 +281,10 @@ def estimate_initial_parameters(
     collisional_width_guess_cm_inv: float = 0.04,
     peak_search_half_width_cm_inv: float = 0.03,
 ) -> VoigtFitParameters:
-    """Estimate a MATLAB-style initial parameter set for one spectrum."""
+    """Estimate a constrained initial parameter set for one spectrum."""
+
+    if anchor_index != 0:
+        raise ValueError("The constrained three-line fit currently requires anchor_index=0.")
 
     mask = np.isfinite(frequency_cm_inv) & np.isfinite(absorbance)
 
@@ -245,34 +312,45 @@ def estimate_initial_parameters(
     baseline_corrected_absorbance = absorbance_fit - baseline_fit
 
     anchor_center_guess = float(frequency_fit[int(np.nanargmax(baseline_corrected_absorbance))])
-    initial_center_guesses = anchor_center_guess + transition_relative_offsets(
+    nominal_offsets = transition_relative_offsets(
         transitions,
         anchor_index=anchor_index,
     )
-    collisional_width_guesses = np.full(len(transitions), collisional_width_guess_cm_inv, dtype=float)
-    line_area_guesses = np.empty(len(transitions), dtype=float)
+    initial_center_guesses = np.empty(len(transitions), dtype=float)
+    initial_center_guesses[0] = anchor_center_guess
 
-    for line_index, (center_guess, transition, width_guess) in enumerate(
-        zip(initial_center_guesses, transitions, collisional_width_guesses)
-    ):
-        local_mask = np.abs(frequency_fit - center_guess) <= peak_search_half_width_cm_inv
+    if len(transitions) > 1:
+        secondary_center_guess = anchor_center_guess + nominal_offsets[1]
+        local_mask = np.abs(frequency_fit - secondary_center_guess) <= peak_search_half_width_cm_inv
 
         if np.any(local_mask):
             local_frequency = frequency_fit[local_mask]
             local_absorbance = baseline_corrected_absorbance[local_mask]
             local_peak_index = int(np.nanargmax(local_absorbance))
-            refined_center = float(local_frequency[local_peak_index])
-            peak_absorbance_guess = float(max(local_absorbance[local_peak_index], 1.0e-4))
-            initial_center_guesses[line_index] = refined_center
+            initial_center_guesses[1] = float(local_frequency[local_peak_index])
         else:
-            peak_absorbance_guess = float(max(np.nanmax(baseline_corrected_absorbance), 1.0e-4))
+            initial_center_guesses[1] = secondary_center_guess
 
-        sigma_guess = doppler_sigma_cm_inv(transition.center_cm_inv, temperature_guess_k)
-        line_area_guesses[line_index] = integrated_area_guess(
-            sigma_guess,
-            width_guess,
-            peak_absorbance_guess,
-        )
+    if len(transitions) > 2:
+        initial_center_guesses[2:] = anchor_center_guess + nominal_offsets[2:]
+
+    collisional_width_guesses = np.full(len(transitions), collisional_width_guess_cm_inv, dtype=float)
+    if len(transitions) > 2:
+        collisional_width_guesses[2:] = collisional_width_guesses[1]
+
+    peak_absorbance_guess = float(max(np.nanmax(baseline_corrected_absorbance), 1.0e-4))
+    sigma_guess = doppler_sigma_cm_inv(transitions[0].center_cm_inv, temperature_guess_k)
+    strongest_line_area_guess = integrated_area_guess(
+        sigma_guess,
+        collisional_width_guess_cm_inv,
+        peak_absorbance_guess,
+    )
+    strength_ratios = transition_strength_ratios(
+        temperature_guess_k,
+        transitions=transitions,
+        anchor_index=anchor_index,
+    )
+    line_area_guesses = strongest_line_area_guess * strength_ratios
 
     return VoigtFitParameters(
         temperature_k=float(temperature_guess_k),
@@ -284,15 +362,36 @@ def estimate_initial_parameters(
     )
 
 
-def _parameters_to_vector(parameters: VoigtFitParameters) -> Array1D:
-    """Pack fit parameters into the optimizer vector."""
+def _parameters_to_vector(
+    parameters: VoigtFitParameters,
+    transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
+) -> Array1D:
+    """Pack explicit fit parameters into the constrained optimizer vector."""
+
+    nominal_offsets = transition_relative_offsets(transitions, anchor_index=0)
+    secondary_center_delta = 0.0
+
+    if parameters.line_centers_relative_cm_inv.size > 1:
+        secondary_center_delta = float(
+            parameters.line_centers_relative_cm_inv[1]
+            - (parameters.line_centers_relative_cm_inv[0] + nominal_offsets[1])
+        )
+
+    primary_width = float(parameters.collisional_hwhm_cm_inv[0])
+    shared_weak_width = float(
+        parameters.collisional_hwhm_cm_inv[1]
+        if parameters.collisional_hwhm_cm_inv.size > 1
+        else primary_width
+    )
+    strongest_line_area = float(parameters.line_areas[0])
 
     return np.concatenate(
         [
             np.array([parameters.temperature_k], dtype=float),
-            np.asarray(parameters.line_centers_relative_cm_inv, dtype=float),
-            np.asarray(parameters.collisional_hwhm_cm_inv, dtype=float),
-            np.asarray(parameters.line_areas, dtype=float),
+            np.array([parameters.line_centers_relative_cm_inv[0]], dtype=float),
+            np.array([secondary_center_delta], dtype=float),
+            np.array([primary_width, shared_weak_width], dtype=float),
+            np.array([strongest_line_area], dtype=float),
             np.array([parameters.baseline_offset, parameters.baseline_slope], dtype=float),
         ]
     )
@@ -301,27 +400,43 @@ def _parameters_to_vector(parameters: VoigtFitParameters) -> Array1D:
 def _vector_to_parameters(
     parameter_vector: Array1D,
     transition_count: int,
+    transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
 ) -> VoigtFitParameters:
-    """Unpack the optimizer vector into a dataclass."""
+    """Expand the constrained optimizer vector into explicit line parameters."""
 
-    centers_start = 1
-    widths_start = centers_start + transition_count
-    areas_start = widths_start + transition_count
+    if transition_count != len(transitions):
+        raise ValueError("Transition count must match the constrained transition set.")
+
+    nominal_offsets = transition_relative_offsets(transitions, anchor_index=0)
+    anchor_center = float(parameter_vector[1])
+    secondary_center_delta = float(parameter_vector[2])
+    temperature_k = float(parameter_vector[0])
+    line_centers = np.asarray(
+        [
+            anchor_center,
+            anchor_center + nominal_offsets[1] + secondary_center_delta,
+            anchor_center + nominal_offsets[2],
+        ],
+        dtype=float,
+    )
+    primary_width = float(parameter_vector[3])
+    shared_weak_width = float(parameter_vector[4])
+    collisional_widths = np.asarray(
+        [primary_width, shared_weak_width, shared_weak_width],
+        dtype=float,
+    )
+    strongest_line_area = float(parameter_vector[5])
+    line_areas = strongest_line_area * transition_strength_ratios(
+        temperature_k,
+        transitions=transitions,
+        anchor_index=0,
+    )
 
     return VoigtFitParameters(
-        temperature_k=float(parameter_vector[0]),
-        line_centers_relative_cm_inv=np.asarray(
-            parameter_vector[centers_start:widths_start],
-            dtype=float,
-        ),
-        collisional_hwhm_cm_inv=np.asarray(
-            parameter_vector[widths_start:areas_start],
-            dtype=float,
-        ),
-        line_areas=np.asarray(
-            parameter_vector[areas_start : areas_start + transition_count],
-            dtype=float,
-        ),
+        temperature_k=temperature_k,
+        line_centers_relative_cm_inv=line_centers,
+        collisional_hwhm_cm_inv=collisional_widths,
+        line_areas=np.asarray(line_areas, dtype=float),
         baseline_offset=float(parameter_vector[-2]),
         baseline_slope=float(parameter_vector[-1]),
     )
@@ -331,33 +446,40 @@ def _parameter_bounds(
     frequency_cm_inv: Array1D,
     initial_parameters: VoigtFitParameters,
     transition_count: int,
-    center_half_window_cm_inv: float = 0.06,
+    transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
+    center_half_window_cm_inv: float = 0.05,
+    secondary_center_delta_limit_cm_inv: float = 0.03,
 ) -> tuple[Array1D, Array1D]:
-    """Return bounded search limits around the MATLAB-style initial guesses."""
+    """Return bounded search limits for the constrained optimizer vector."""
 
-    center_lower = np.maximum(
-        initial_parameters.line_centers_relative_cm_inv - center_half_window_cm_inv,
-        np.min(frequency_cm_inv) - 0.01,
+    if transition_count != len(transitions):
+        raise ValueError("Transition count must match the constrained transition set.")
+
+    nominal_offsets = transition_relative_offsets(transitions, anchor_index=0)
+    anchor_center = float(initial_parameters.line_centers_relative_cm_inv[0])
+    secondary_center_delta = float(
+        initial_parameters.line_centers_relative_cm_inv[1]
+        - (anchor_center + nominal_offsets[1])
     )
-    center_upper = np.minimum(
-        initial_parameters.line_centers_relative_cm_inv + center_half_window_cm_inv,
-        np.max(frequency_cm_inv) + 0.01,
-    )
+    center_lower = max(anchor_center - center_half_window_cm_inv, float(np.min(frequency_cm_inv) - 0.01))
+    center_upper = min(anchor_center + center_half_window_cm_inv, float(np.max(frequency_cm_inv) + 0.01))
     lower_bounds = np.concatenate(
         [
             np.array([500.0], dtype=float),
-            center_lower,
-            np.full(transition_count, 1.0e-4, dtype=float),
-            np.full(transition_count, 1.0e-8, dtype=float),
+            np.array([center_lower], dtype=float),
+            np.array([secondary_center_delta - secondary_center_delta_limit_cm_inv], dtype=float),
+            np.array([1.0e-4, 1.0e-4], dtype=float),
+            np.array([1.0e-8], dtype=float),
             np.array([-0.2, -5.0], dtype=float),
         ]
     )
     upper_bounds = np.concatenate(
         [
             np.array([6000.0], dtype=float),
-            center_upper,
-            np.full(transition_count, 0.5, dtype=float),
-            np.full(transition_count, 10.0, dtype=float),
+            np.array([center_upper], dtype=float),
+            np.array([secondary_center_delta + secondary_center_delta_limit_cm_inv], dtype=float),
+            np.array([0.5, 0.5], dtype=float),
+            np.array([10.0], dtype=float),
             np.array([0.2, 5.0], dtype=float),
         ]
     )
@@ -375,10 +497,19 @@ def fit_voigt_spectrum(
 ) -> VoigtFitResult:
     """Fit one absorbance spectrum with a sum of three Voigt profiles.
 
-    This keeps a shared Doppler temperature, but it frees every line center,
-    collisional width, and integrated area to match the MATLAB demo structure
-    more closely than the earlier constrained-offset implementation.
+    The current constrained model is tuned to keep line identities stable
+    sweep-to-sweep:
+
+    - `P(0,31)` is the anchor line and remains the dominant transition
+    - `P(2,20)` keeps a small free center adjustment near its nominal offset
+    - `P(3,14)` is held at a fixed center offset from `P(0,31)`
+    - `P(2,20)` and `P(3,14)` share a collisional half-width
+    - all line areas are derived from one strongest-line area and
+      temperature-dependent line-strength ratios
     """
+
+    if anchor_index != 0:
+        raise ValueError("The constrained three-line fit currently requires anchor_index=0.")
 
     if frequency_cm_inv.shape != absorbance.shape:
         raise ValueError("Frequency and absorbance inputs must have matching shapes.")
@@ -403,11 +534,20 @@ def fit_voigt_spectrum(
         frequency_fit,
         initial_parameters,
         len(transitions),
+        transitions=transitions,
     )
-    initial_vector = np.clip(_parameters_to_vector(initial_parameters), lower_bounds, upper_bounds)
+    initial_vector = np.clip(
+        _parameters_to_vector(initial_parameters, transitions=transitions),
+        lower_bounds,
+        upper_bounds,
+    )
 
     def residual_function(parameter_vector: Array1D) -> Array1D:
-        parameters = _vector_to_parameters(parameter_vector, len(transitions))
+        parameters = _vector_to_parameters(
+            parameter_vector,
+            len(transitions),
+            transitions=transitions,
+        )
         fitted_absorbance, _, _, _ = evaluate_voigt_spectrum(
             frequency_fit,
             parameters,
@@ -427,6 +567,7 @@ def fit_voigt_spectrum(
     best_fit_parameters = _vector_to_parameters(
         np.asarray(optimization_result.x, dtype=float),
         len(transitions),
+        transitions=transitions,
     )
     (
         fitted_absorbance,

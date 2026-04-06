@@ -7,13 +7,15 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from mock_lab.spectroscopy.tips import get_co_partition_sum
-from mock_lab.spectroscopy.voigt import DEFAULT_CO_TRANSITIONS, T_REF_K, Transition
+from mock_lab.spectroscopy.voigt import (
+    DEFAULT_CO_TRANSITIONS,
+    Transition,
+    line_strength_at_temperature,
+)
 
 
 Array1D = NDArray[np.float64]
 
-SECOND_RADIATION_CONSTANT_CM_K = 1.438776877
 IDEAL_GAS_NUMBER_DENSITY_COEFF_CM3 = 101325.0 / 1.380649e-23 / 1.0e6
 DEFAULT_OPTICAL_PATH_LENGTH_CM = 10.32
 DEFAULT_PRESSURE_BROADENING_SCALE = 0.84
@@ -28,39 +30,6 @@ class StateHistory:
     temperature_k: Array1D
     pressure_atm: Array1D
     co_mole_fraction: Array1D
-
-
-def co_partition_function_ratio(temperature_k: float) -> float:
-    """Return the CO partition-function ratio Q(T)/Q(T_ref) from local TIPS data."""
-
-    return float(get_co_partition_sum(float(temperature_k)) / get_co_partition_sum(float(T_REF_K)))
-
-
-def line_strength_at_temperature(
-    temperature_k: float,
-    transition: Transition,
-) -> float:
-    """Approximate the transition line strength at temperature `T`."""
-
-    partition_ratio = co_partition_function_ratio(temperature_k)
-    stimulated_emission_ratio = (
-        1.0
-        - np.exp(-SECOND_RADIATION_CONSTANT_CM_K * transition.center_cm_inv / temperature_k)
-    ) / (
-        1.0
-        - np.exp(-SECOND_RADIATION_CONSTANT_CM_K * transition.center_cm_inv / T_REF_K)
-    )
-    lower_state_ratio = np.exp(
-        -SECOND_RADIATION_CONSTANT_CM_K
-        * transition.lower_state_energy_cm_inv
-        * (1.0 / temperature_k - 1.0 / T_REF_K)
-    )
-    return float(
-        transition.line_strength_ref
-        * (1.0 / partition_ratio)
-        * lower_state_ratio
-        * stimulated_emission_ratio
-    )
 
 
 def corrected_pressure_from_broadening(

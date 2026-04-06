@@ -185,6 +185,7 @@ def plot_voigt_fit(
     component_absorbance: NDArray[np.float64],
     *,
     component_labels: tuple[str, ...],
+    component_centers_cm_inv: Array1D | None = None,
     absorbance_limits: tuple[float, float] | None = None,
     residual_limits: tuple[float, float] | None = None,
     annotation_text: str | None = None,
@@ -216,13 +217,27 @@ def plot_voigt_fit(
         label="Voigt fit",
     )
 
-    for component_signal, component_label in zip(component_absorbance, component_labels):
+    component_colors = ("tab:blue", "tab:green", "tab:orange", "tab:purple", "tab:brown")
+
+    for component_index, (component_signal, component_label) in enumerate(
+        zip(component_absorbance, component_labels)
+    ):
+        color = component_colors[component_index % len(component_colors)]
         ax.plot(
             relative_wavenumber_cm_inv,
             component_signal,
+            color=color,
             linewidth=1.2,
             label=component_label,
         )
+        if component_centers_cm_inv is not None and component_index < len(component_centers_cm_inv):
+            ax.axvline(
+                float(component_centers_cm_inv[component_index]),
+                color=color,
+                linewidth=1.0,
+                linestyle=":",
+                alpha=0.9,
+            )
 
     ax.set_ylabel("Absorbance [-]")
     if absorbance_limits is not None:

@@ -14,6 +14,7 @@ The files that matter most for the current workflow are:
 - `src/mock_lab/spectroscopy/voigt.py`: three-transition Voigt model, initial guesses, bounds, and nonlinear least-squares fitting
 - `src/mock_lab/spectroscopy/state_estimation.py`: convert fitted line parameters into temperature, pressure, and CO mole fraction
 - `src/mock_lab/spectroscopy/tips.py`: local HITRAN TIPS partition-sum lookup used by the state-estimation layer
+- `third_party/hitran_tips/`: vendored HITRAN TIPS script and partition-sum tables
 - `src/mock_lab/plotting/figures.py`: all report-style plotting helpers
 - `src/mock_lab/pipelines/etalon.py`: end-to-end etalon calibration pass
 - `src/mock_lab/pipelines/shock_snapshot.py`: build the baseline-corrected and absorbance-domain shock spectra
@@ -28,6 +29,8 @@ There are also two older placeholder pipelines that are not the active implement
 
 - `src/mock_lab/pipelines/baseline.py`
 - `src/mock_lab/pipelines/full_pipeline.py`
+
+The `data/` tree is now reserved for experimental inputs and generated analysis products. The local HITRAN TIPS resources are kept under `third_party/hitran_tips/` because they are vendored reference assets, not raw lab data.
 
 ## Recommended Entry Points
 
@@ -181,14 +184,18 @@ The fitting model is:
 
 - total absorbance = sum of three Voigt profiles + linear baseline
 
-The current free parameters for each fitted sweep are:
+The current optimizer uses a constrained parameterization for each fitted sweep. The free quantities are:
 
 - one shared temperature `temperature_k`
-- three independent line centers `line_centers_relative_cm_inv`
-- three independent collisional half-widths `collisional_hwhm_cm_inv`
-- three independent integrated areas `line_areas`
+- one anchor center for `P(0,31)`
+- one small center adjustment for `P(2,20)` relative to its nominal offset from `P(0,31)`
+- one collisional half-width for `P(0,31)`
+- one shared collisional half-width for `P(2,20)` and `P(3,14)`
+- one integrated area for the strongest line `P(0,31)`
 - one linear baseline offset
 - one linear baseline slope
+
+The stored fit result is still expanded back into explicit per-line centers, widths, and areas so the saved output files remain easy to inspect.
 
 The current fixed ingredients are:
 
@@ -198,6 +205,9 @@ The current fixed ingredients are:
 - the Voigt profile functional form from `scipy.special.voigt_profile`
 - optimizer bounds built in `_parameter_bounds()`
 - the optimization method in `fit_voigt_spectrum()`
+- the fixed center offset of `P(3,14)` from `P(0,31)`
+- the shared collisional width constraint between `P(2,20)` and `P(3,14)`
+- the temperature-dependent line-strength ratios that tie all three integrated areas to the strongest line area
 
 The actual nonlinear fit is done with `scipy.optimize.least_squares` in `fit_voigt_spectrum()` using:
 
@@ -209,11 +219,13 @@ The actual nonlinear fit is done with `scipy.optimize.least_squares` in `fit_voi
 How the fit is initialized:
 
 - `estimate_initial_parameters()` first fits a line to the spectrum edges to estimate a baseline.
-- The strongest peak in the baseline-corrected absorbance is used to seed an anchor center.
-- The handout transition center spacings are used only as initial center offsets through `transition_relative_offsets()`.
-- Each line center is then refined locally near its guessed position.
-- Each collisional width is initially guessed as `0.04 cm^-1`.
-- Each line area is seeded from an approximate peak-height-to-area conversion with `integrated_area_guess()`.
+- The strongest peak in the baseline-corrected absorbance is used to seed the `P(0,31)` anchor center.
+- The handout transition center spacings are used to seed the weaker lines.
+- `P(2,20)` gets one local refinement near its nominal position.
+- `P(3,14)` is kept at its nominal offset from the anchor line from the start.
+- The strong-line and weak-line collisional width guesses are both initialized at `0.04 cm^-1`.
+- The strongest-line area is seeded from an approximate peak-height-to-area conversion with `integrated_area_guess()`.
+- The weaker line areas are then derived from temperature-dependent line-strength ratios instead of being guessed independently.
 
 How sweep-to-sweep fitting works:
 
@@ -221,7 +233,7 @@ How sweep-to-sweep fitting works:
 - Sweeps with too little usable signal are skipped if their peak absorbance is below `minimum_peak_absorbance=0.02`.
 - The previous successful fit is used as the initial guess for the next sweep.
 
-This means the current fitter behaves like a sequential, warm-started least-squares pass rather than fully independent fits on every scan.
+This means the current fitter behaves like a sequential, warm-started least-squares pass rather than fully independent fits on every scan, while also keeping the three transition identities from swapping when the peaks overlap strongly.
 
 Important fit outputs written by `src/mock_lab/pipelines/voigt_fit.py`:
 
@@ -272,8 +284,9 @@ Current behavior:
 Partition sums:
 
 - The code no longer uses the earlier RRHO approximation.
-- `src/mock_lab/spectroscopy/tips.py` reads the local HITRAN TIPS tables from `data/TIPS/`.
-- `src/mock_lab/spectroscopy/state_estimation.py` uses those partition sums when evaluating `Q(T) / Q(T_ref)` for line-strength scaling.
+- `src/mock_lab/spectroscopy/tips.py` reads the local HITRAN TIPS tables from `third_party/hitran_tips/`.
+- `src/mock_lab/spectroscopy/voigt.py` now owns the temperature-dependent line-strength helper and uses the local TIPS data when evaluating `Q(T) / Q(T_ref)`.
+- `src/mock_lab/spectroscopy/state_estimation.py` reuses that shared spectroscopy helper when converting fitted line area into CO mole fraction.
 
 Current state-estimation assumptions:
 
@@ -300,9 +313,12 @@ This rebuilds the precursor products, fits all sweeps, and then renders a video 
 
 - measured absorbance
 - fitted total spectrum
-- component spectra
+- the three component spectra
+- dotted vertical center markers for the fitted line positions
 - residual
-- scan annotation
+- scan annotation with sweep index, fit status, fitted temperature, and RMSE
+
+The video intentionally does not annotate pressure right now.
 
 The video renderer lives in `src/mock_lab/pipelines/voigt_fit_video.py`, and the output is written to `results/videos/shock_voigt_fit_progression.mp4`.
 
@@ -349,6 +365,34 @@ The main generated products are:
 - `results/tables/state_history.csv`
 - `results/tables/state_history.npz`
 - `results/videos/shock_voigt_fit_progression.mp4`
+
+## Where The Three Transition Constants Live
+
+The spectroscopic constants from the handout for `P(0,31)`, `P(2,20)`, and `P(3,14)` are currently stored in one place:
+
+- `src/mock_lab/spectroscopy/voigt.py` in `DEFAULT_CO_TRANSITIONS`
+
+Each `Transition` entry holds:
+
+- `center_cm_inv`
+- `line_strength_ref`
+- `lower_state_energy_cm_inv`
+- `gamma_n2_cm_inv_atm`
+- `n_n2`
+- `gamma_co_cm_inv_atm`
+- `n_co`
+
+Those values are used in two main parts of the code:
+
+- `src/mock_lab/spectroscopy/voigt.py`
+  - `center_cm_inv` is used for Doppler-width calculations and to seed the initial line-center guesses
+  - `line_strength_ref`, `lower_state_energy_cm_inv`, and `center_cm_inv` are used in the temperature-dependent line-strength ratios that tie the fitted line areas together
+  - `gamma_n2_cm_inv_atm` and `n_n2` are used to convert fitted Lorentz widths into apparent pressures
+- `src/mock_lab/spectroscopy/state_estimation.py`
+  - the strongest transition, `DEFAULT_CO_TRANSITIONS[0]`, is used by default when converting fitted integrated area into CO mole fraction
+  - the actual line-strength evaluation is imported from `src/mock_lab/spectroscopy/voigt.py` so the spectroscopy stays consistent between fitting and post-processing
+
+So if you want to edit the handout spectroscopic inputs themselves, start in `src/mock_lab/spectroscopy/voigt.py`. If you want to change how those constants are used after the fit, start in `src/mock_lab/spectroscopy/state_estimation.py`.
 
 ## Tests
 

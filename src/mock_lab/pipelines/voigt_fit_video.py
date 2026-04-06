@@ -13,7 +13,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from mock_lab.plotting.figures import plot_voigt_fit, save_figure
-from mock_lab.spectroscopy.voigt import VoigtFitParameters, evaluate_voigt_spectrum
+from mock_lab.spectroscopy.voigt import (
+    DEFAULT_CO_TRANSITIONS,
+    VoigtFitParameters,
+    evaluate_voigt_spectrum,
+)
 
 
 Array1D = NDArray[np.float64]
@@ -92,18 +96,16 @@ def _annotation_text(
     sweep_index: int,
     success: bool,
     temperature_k: float,
-    mean_apparent_pressure_atm: float,
     rmse_absorbance: float,
 ) -> str:
     """Build the per-frame fit summary shown in the upper panel."""
 
-    if success and np.isfinite(temperature_k) and np.isfinite(mean_apparent_pressure_atm):
+    if success and np.isfinite(temperature_k):
         return "\n".join(
             [
                 f"Sweep {sweep_index:03d}",
                 "Fit converged",
                 f"T = {temperature_k:.0f} K",
-                f"P_app = {mean_apparent_pressure_atm:.3f} atm",
                 f"RMSE = {rmse_absorbance:.4f}",
             ]
         )
@@ -174,29 +176,34 @@ def render_voigt_fit_video(
                     baseline_offset=float(baseline_offset[sweep_index]),
                     baseline_slope=float(baseline_slope[sweep_index]),
                 )
-                fitted_frame, component_frame, _, apparent_pressure_values = evaluate_voigt_spectrum(
+                fitted_frame, component_frame, _, _ = evaluate_voigt_spectrum(
                     frequency_frame,
                     parameters,
                 )
-                mean_apparent_pressure_atm = float(np.mean(apparent_pressure_values))
             else:
                 fitted_frame = np.full_like(absorbance_frame, np.nan)
                 component_frame = np.empty((0, absorbance_frame.size), dtype=float)
-                mean_apparent_pressure_atm = float("nan")
 
             figure = plot_voigt_fit(
                 frequency_frame,
                 absorbance_frame,
                 fitted_frame,
                 component_frame,
-                component_labels=tuple(),
+                component_labels=tuple(
+                    transition.label for transition in DEFAULT_CO_TRANSITIONS[: component_frame.shape[0]]
+                ),
+                component_centers_cm_inv=np.asarray(
+                    line_centers_relative_cm_inv[sweep_index],
+                    dtype=float,
+                )
+                if fit_available
+                else None,
                 absorbance_limits=absorbance_limits,
                 residual_limits=residual_limits,
                 annotation_text=_annotation_text(
                     sweep_index,
                     fit_available,
                     float(temperature_k[sweep_index]),
-                    mean_apparent_pressure_atm,
                     float(rmse_absorbance[sweep_index]),
                 ),
             )
