@@ -216,6 +216,12 @@ The actual nonlinear fit is done with `scipy.optimize.least_squares` in `fit_voi
 - `f_scale=0.01`
 - `max_nfev=1500`
 
+Uncertainty on the fitted quantities is currently estimated from the local least-squares Jacobian at the optimum:
+
+- `src/mock_lab/spectroscopy/voigt.py` builds an approximate reduced-parameter covariance from the fitted Jacobian
+- that covariance is propagated to the reported temperature, line centers, line widths, line areas, and mean apparent pressure with a local linearization
+- the current exported intervals are approximate two-sided `95%` confidence intervals
+
 How the fit is initialized:
 
 - `estimate_initial_parameters()` first fits a line to the spectrum edges to estimate a baseline.
@@ -246,10 +252,15 @@ The saved arrays include:
 - fitted absorbance sweeps
 - success flags
 - fitted temperatures
+- fitted temperature confidence intervals
 - mean apparent pressures
+- mean apparent pressure confidence intervals
 - fitted line centers
+- fitted line-center confidence intervals
 - fitted collisional widths
+- fitted collisional-width confidence intervals
 - fitted line areas
+- fitted line-area confidence intervals
 - RMSE values
 
 If you want the current Python fit to look more or less like the MATLAB demo, compare:
@@ -278,8 +289,9 @@ Current behavior:
 4. Average those three apparent pressures per scan in `src/mock_lab/pipelines/voigt_fit.py`
 5. Apply the handout-style correction factor `DEFAULT_PRESSURE_BROADENING_SCALE = 0.84` in `corrected_pressure_from_broadening()`
 6. Estimate CO mole fraction from the integrated area of the strongest line only, using `estimate_co_mole_fraction()`
-7. Save the history arrays to `results/tables/state_history.csv` and `results/tables/state_history.npz`
-8. Save the plot `results/figures/state_history.png`
+7. Propagate the saved fit covariance into approximate `95%` confidence intervals on temperature, corrected pressure, and CO mole fraction
+8. Save the history arrays to `results/tables/state_history.csv` and `results/tables/state_history.npz`
+9. Save the plot `results/figures/state_history.png`
 
 Partition sums:
 
@@ -295,6 +307,7 @@ Current state-estimation assumptions:
 - CO mole fraction is estimated from the strongest line area only.
 - The optical path length is fixed by `DEFAULT_OPTICAL_PATH_LENGTH_CM = 10.32`.
 - The ideal-gas number-density relation is used to map pressure and temperature to total number density.
+- The exported uncertainty bands are local covariance-based intervals, not a full Bayesian posterior or bootstrap result.
 
 Files to edit if you want to change the final derived quantities:
 

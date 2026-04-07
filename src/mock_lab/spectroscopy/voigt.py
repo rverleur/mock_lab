@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import least_squares
 from scipy.special import voigt_profile
+from scipy.stats import t as student_t
 
 from mock_lab.spectroscopy.tips import get_co_partition_sum
 
@@ -117,6 +119,15 @@ class VoigtFitResult:
     nfev: int
     cost: float
     rmse_absorbance: float
+    reduced_parameter_vector: Array1D
+    reduced_parameter_covariance: Array2D
+    confidence_level: float
+    confidence_scale: float
+    temperature_ci_half_width: float
+    line_centers_ci_half_width: Array1D
+    collisional_hwhm_ci_half_width: Array1D
+    line_areas_ci_half_width: Array1D
+    mean_apparent_pressure_ci_half_width: float
 
 
 def transition_relative_offsets(
@@ -209,6 +220,86 @@ def integrated_area_guess(
         )[0]
     )
     return float(max(peak_absorbance_guess / linecenter_profile_value, 1.0e-8))
+
+
+def _confidence_scale(confidence_level: float, dof: int) -> float:
+    """Return the two-sided confidence multiplier for a Student-t interval."""
+
+    if dof <= 0:
+        return float("nan")
+
+    return float(student_t.ppf(0.5 * (1.0 + confidence_level), dof))
+
+
+def _finite_difference_jacobian(
+    function: Callable[[Array1D], Array1D],
+    parameter_vector: Array1D,
+    relative_step: float = 1.0e-6,
+) -> Array2D:
+    """Estimate the Jacobian of a vector-valued function by central differences."""
+
+    parameter_vector = np.asarray(parameter_vector, dtype=float)
+    base_value = np.atleast_1d(np.asarray(function(parameter_vector), dtype=float))
+    jacobian = np.empty((base_value.size, parameter_vector.size), dtype=float)
+
+    for index in range(parameter_vector.size):
+        step = relative_step * max(abs(float(parameter_vector[index])), 1.0)
+        plus_vector = np.array(parameter_vector, copy=True)
+        minus_vector = np.array(parameter_vector, copy=True)
+        plus_vector[index] += step
+        minus_vector[index] -= step
+        plus_value = np.atleast_1d(np.asarray(function(plus_vector), dtype=float))
+        minus_value = np.atleast_1d(np.asarray(function(minus_vector), dtype=float))
+        jacobian[:, index] = (plus_value - minus_value) / (2.0 * step)
+
+    return jacobian
+
+
+def _reduced_parameter_covariance(
+    jacobian: Array2D,
+    residual_vector: Array1D,
+) -> tuple[Array2D, float]:
+    """Estimate the reduced-parameter covariance from the least-squares Jacobian."""
+
+    jacobian = np.asarray(jacobian, dtype=float)
+    residual_vector = np.asarray(residual_vector, dtype=float)
+    degrees_of_freedom = residual_vector.size - jacobian.shape[1]
+
+    if degrees_of_freedom <= 0:
+        covariance = np.full((jacobian.shape[1], jacobian.shape[1]), np.nan, dtype=float)
+        return covariance, float("nan")
+
+    residual_variance = float(np.sum(residual_vector**2) / degrees_of_freedom)
+    information_matrix = jacobian.T @ jacobian
+    covariance = residual_variance * np.linalg.pinv(information_matrix)
+    return np.asarray(covariance, dtype=float), residual_variance
+
+
+def _fit_summary_vector(
+    parameters: VoigtFitParameters,
+    mean_apparent_pressure_atm: float,
+) -> Array1D:
+    """Flatten the main reported fit quantities into one vector."""
+
+    return np.concatenate(
+        [
+            np.array([parameters.temperature_k], dtype=float),
+            np.asarray(parameters.line_centers_relative_cm_inv, dtype=float),
+            np.asarray(parameters.collisional_hwhm_cm_inv, dtype=float),
+            np.asarray(parameters.line_areas, dtype=float),
+            np.array([mean_apparent_pressure_atm], dtype=float),
+        ]
+    )
+
+
+def finite_difference_jacobian(
+    function: Callable[[Array1D], Array1D],
+    parameter_vector: Array1D,
+    relative_step: float = 1.0e-6,
+) -> Array2D:
+    """Public wrapper around the local finite-difference Jacobian helper."""
+
+    return _finite_difference_jacobian(function, parameter_vector, relative_step=relative_step)
 
 
 def apparent_pressure_atm(
@@ -442,6 +533,28 @@ def _vector_to_parameters(
     )
 
 
+def pack_constrained_parameters(
+    parameters: VoigtFitParameters,
+    transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
+) -> Array1D:
+    """Return the constrained optimizer vector for one explicit fit result."""
+
+    return _parameters_to_vector(parameters, transitions=transitions)
+
+
+def expand_constrained_parameters(
+    parameter_vector: Array1D,
+    transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
+) -> VoigtFitParameters:
+    """Expand one constrained optimizer vector into explicit line parameters."""
+
+    return _vector_to_parameters(
+        np.asarray(parameter_vector, dtype=float),
+        len(transitions),
+        transitions=transitions,
+    )
+
+
 def _parameter_bounds(
     frequency_cm_inv: Array1D,
     initial_parameters: VoigtFitParameters,
@@ -494,6 +607,7 @@ def fit_voigt_spectrum(
     transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
     anchor_index: int = 0,
     max_nfev: int = 1500,
+    confidence_level: float = 0.95,
 ) -> VoigtFitResult:
     """Fit one absorbance spectrum with a sum of three Voigt profiles.
 
@@ -564,8 +678,9 @@ def fit_voigt_spectrum(
         f_scale=0.01,
         max_nfev=max_nfev,
     )
+    best_fit_vector = np.asarray(optimization_result.x, dtype=float)
     best_fit_parameters = _vector_to_parameters(
-        np.asarray(optimization_result.x, dtype=float),
+        best_fit_vector,
         len(transitions),
         transitions=transitions,
     )
@@ -580,6 +695,59 @@ def fit_voigt_spectrum(
         transitions=transitions,
     )
     residual_absorbance = absorbance_fit - fitted_absorbance
+    mean_apparent_pressure_atm = float(np.mean(apparent_pressure_values_atm))
+    reduced_parameter_covariance, _ = _reduced_parameter_covariance(
+        np.asarray(optimization_result.jac, dtype=float),
+        np.asarray(optimization_result.fun, dtype=float),
+    )
+    degrees_of_freedom = frequency_fit.size - best_fit_vector.size
+    confidence_scale = _confidence_scale(confidence_level, degrees_of_freedom)
+
+    temperature_ci_half_width = float("nan")
+    line_centers_ci_half_width = np.full(len(transitions), np.nan, dtype=float)
+    collisional_hwhm_ci_half_width = np.full(len(transitions), np.nan, dtype=float)
+    line_areas_ci_half_width = np.full(len(transitions), np.nan, dtype=float)
+    mean_apparent_pressure_ci_half_width = float("nan")
+
+    if np.all(np.isfinite(reduced_parameter_covariance)) and np.isfinite(confidence_scale):
+        def summary_function(parameter_vector: Array1D) -> Array1D:
+            parameters = expand_constrained_parameters(parameter_vector, transitions=transitions)
+            mean_pressure = float(
+                np.mean(
+                    apparent_pressure_atm(
+                        parameters.collisional_hwhm_cm_inv,
+                        parameters.temperature_k,
+                        transitions=transitions,
+                    )
+                )
+            )
+            return _fit_summary_vector(parameters, mean_pressure)
+
+        summary_jacobian = _finite_difference_jacobian(summary_function, best_fit_vector)
+        summary_covariance = summary_jacobian @ reduced_parameter_covariance @ summary_jacobian.T
+        summary_standard_error = np.sqrt(
+            np.clip(np.diag(np.asarray(summary_covariance, dtype=float)), a_min=0.0, a_max=None)
+        )
+        summary_half_width = confidence_scale * summary_standard_error
+        transition_count = len(transitions)
+        centers_start = 1
+        widths_start = centers_start + transition_count
+        areas_start = widths_start + transition_count
+        pressure_index = areas_start + transition_count
+        temperature_ci_half_width = float(summary_half_width[0])
+        line_centers_ci_half_width = np.asarray(
+            summary_half_width[centers_start:widths_start],
+            dtype=float,
+        )
+        collisional_hwhm_ci_half_width = np.asarray(
+            summary_half_width[widths_start:areas_start],
+            dtype=float,
+        )
+        line_areas_ci_half_width = np.asarray(
+            summary_half_width[areas_start:pressure_index],
+            dtype=float,
+        )
+        mean_apparent_pressure_ci_half_width = float(summary_half_width[pressure_index])
 
     return VoigtFitResult(
         frequency_cm_inv=frequency_fit,
@@ -597,6 +765,15 @@ def fit_voigt_spectrum(
         nfev=int(optimization_result.nfev),
         cost=float(optimization_result.cost),
         rmse_absorbance=float(np.sqrt(np.mean(residual_absorbance**2))),
+        reduced_parameter_vector=best_fit_vector,
+        reduced_parameter_covariance=np.asarray(reduced_parameter_covariance, dtype=float),
+        confidence_level=float(confidence_level),
+        confidence_scale=float(confidence_scale),
+        temperature_ci_half_width=temperature_ci_half_width,
+        line_centers_ci_half_width=np.asarray(line_centers_ci_half_width, dtype=float),
+        collisional_hwhm_ci_half_width=np.asarray(collisional_hwhm_ci_half_width, dtype=float),
+        line_areas_ci_half_width=np.asarray(line_areas_ci_half_width, dtype=float),
+        mean_apparent_pressure_ci_half_width=mean_apparent_pressure_ci_half_width,
     )
 
 
@@ -607,6 +784,7 @@ def fit_voigt_spectra(
     transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
     anchor_index: int = 0,
     minimum_peak_absorbance: float = 0.02,
+    confidence_level: float = 0.95,
 ) -> tuple[VoigtFitResult | None, ...]:
     """Fit a stack of absorbance spectra sweep-by-sweep."""
 
@@ -627,6 +805,7 @@ def fit_voigt_spectra(
             initial_parameters=initial_parameters,
             transitions=transitions,
             anchor_index=anchor_index,
+            confidence_level=confidence_level,
         )
         results.append(fit_result)
 

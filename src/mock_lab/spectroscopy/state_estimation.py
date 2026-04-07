@@ -10,6 +10,8 @@ from numpy.typing import NDArray
 from mock_lab.spectroscopy.voigt import (
     DEFAULT_CO_TRANSITIONS,
     Transition,
+    VoigtFitParameters,
+    apparent_pressure_atm,
     line_strength_at_temperature,
 )
 
@@ -83,6 +85,39 @@ def estimate_co_mole_fraction(
             co_mole_fraction[index] = float(area_value / denominator)
 
     return co_mole_fraction
+
+
+def evaluate_state_from_fit_parameters(
+    parameters: VoigtFitParameters,
+    *,
+    optical_path_length_cm: float = DEFAULT_OPTICAL_PATH_LENGTH_CM,
+    broadening_scale: float = DEFAULT_PRESSURE_BROADENING_SCALE,
+    transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
+    transition: Transition = DEFAULT_CO_TRANSITIONS[0],
+) -> Array1D:
+    """Return `[temperature, corrected_pressure, co_mole_fraction]` for one fit."""
+
+    mean_apparent_pressure = float(
+        np.mean(
+            apparent_pressure_atm(
+                parameters.collisional_hwhm_cm_inv,
+                parameters.temperature_k,
+                transitions=transitions,
+            )
+        )
+    )
+    corrected_pressure = corrected_pressure_from_broadening(
+        np.array([mean_apparent_pressure], dtype=float),
+        broadening_scale=broadening_scale,
+    )[0]
+    co_mole_fraction = estimate_co_mole_fraction(
+        np.array([parameters.temperature_k], dtype=float),
+        np.array([corrected_pressure], dtype=float),
+        np.array([parameters.line_areas[0]], dtype=float),
+        optical_path_length_cm=optical_path_length_cm,
+        transition=transition,
+    )[0]
+    return np.array([parameters.temperature_k, corrected_pressure, co_mole_fraction], dtype=float)
 
 
 def build_state_history(

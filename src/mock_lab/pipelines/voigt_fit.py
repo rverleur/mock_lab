@@ -32,9 +32,19 @@ class VoigtFitPipelineResult:
     success: Bool1D
     temperature_k: Array1D
     mean_apparent_pressure_atm: Array1D
+    temperature_ci95_lower: Array1D
+    temperature_ci95_upper: Array1D
+    mean_apparent_pressure_ci95_lower: Array1D
+    mean_apparent_pressure_ci95_upper: Array1D
     line_centers_relative_cm_inv: Array2D
     collisional_hwhm_cm_inv: Array2D
     line_areas: Array2D
+    line_centers_ci95_lower: Array2D
+    line_centers_ci95_upper: Array2D
+    collisional_hwhm_ci95_lower: Array2D
+    collisional_hwhm_ci95_upper: Array2D
+    line_areas_ci95_lower: Array2D
+    line_areas_ci95_upper: Array2D
     rmse_absorbance: Array1D
     plot_sweep_index: int
 
@@ -50,26 +60,30 @@ def _write_summary_table(
 
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(
-            [
-                "sweep_index",
-                "success",
-                "temperature_k",
-                "mean_apparent_pressure_atm",
-                *[f"line_center_{label}" for label in transition_labels],
-                *[f"collisional_hwhm_{label}" for label in transition_labels],
-                *[f"line_area_{label}" for label in transition_labels],
-                "baseline_offset",
-                "baseline_slope",
-                "rmse_absorbance",
-                "nfev",
-                "message",
-            ]
-        )
+        header = [
+            "sweep_index",
+            "success",
+            "temperature_k",
+            "temperature_ci95_half_width",
+            "mean_apparent_pressure_atm",
+            "mean_apparent_pressure_ci95_half_width",
+            *[f"line_center_{label}" for label in transition_labels],
+            *[f"line_center_ci95_half_width_{label}" for label in transition_labels],
+            *[f"collisional_hwhm_{label}" for label in transition_labels],
+            *[f"collisional_hwhm_ci95_half_width_{label}" for label in transition_labels],
+            *[f"line_area_{label}" for label in transition_labels],
+            *[f"line_area_ci95_half_width_{label}" for label in transition_labels],
+            "baseline_offset",
+            "baseline_slope",
+            "rmse_absorbance",
+            "nfev",
+            "message",
+        ]
+        writer.writerow(header)
 
         for sweep_index, result in enumerate(fit_results):
             if result is None:
-                writer.writerow([sweep_index, False, "", "", "", "", "", "", "", "", "", ""])
+                writer.writerow([sweep_index, False, *[""] * (len(header) - 2)])
                 continue
 
             writer.writerow(
@@ -77,10 +91,15 @@ def _write_summary_table(
                     sweep_index,
                     result.success,
                     f"{result.parameters.temperature_k:.8g}",
+                    f"{result.temperature_ci_half_width:.8g}",
                     f"{np.mean(result.apparent_pressure_atm):.8g}",
+                    f"{result.mean_apparent_pressure_ci_half_width:.8g}",
                     *[f"{value:.8g}" for value in result.parameters.line_centers_relative_cm_inv],
+                    *[f"{value:.8g}" for value in result.line_centers_ci_half_width],
                     *[f"{value:.8g}" for value in result.parameters.collisional_hwhm_cm_inv],
+                    *[f"{value:.8g}" for value in result.collisional_hwhm_ci_half_width],
                     *[f"{value:.8g}" for value in result.parameters.line_areas],
+                    *[f"{value:.8g}" for value in result.line_areas_ci_half_width],
                     f"{result.parameters.baseline_offset:.8g}",
                     f"{result.parameters.baseline_slope:.8g}",
                     f"{result.rmse_absorbance:.8g}",
@@ -141,6 +160,8 @@ def run_voigt_fit_pipeline(
     success = np.zeros(absorbance_sweeps.shape[0], dtype=bool)
     temperature_k = np.full(absorbance_sweeps.shape[0], np.nan, dtype=float)
     mean_apparent_pressure_atm = np.full(absorbance_sweeps.shape[0], np.nan, dtype=float)
+    temperature_ci95_half_width = np.full(absorbance_sweeps.shape[0], np.nan, dtype=float)
+    mean_apparent_pressure_ci95_half_width = np.full(absorbance_sweeps.shape[0], np.nan, dtype=float)
     line_centers_relative_cm_inv = np.full(
         (absorbance_sweeps.shape[0], len(DEFAULT_CO_TRANSITIONS)),
         np.nan,
@@ -152,9 +173,16 @@ def run_voigt_fit_pipeline(
         dtype=float,
     )
     line_areas = np.full((absorbance_sweeps.shape[0], len(DEFAULT_CO_TRANSITIONS)), np.nan, dtype=float)
+    line_centers_ci95_half_width = np.full_like(line_centers_relative_cm_inv, np.nan)
+    collisional_hwhm_ci95_half_width = np.full_like(collisional_hwhm_cm_inv, np.nan)
+    line_areas_ci95_half_width = np.full_like(line_areas, np.nan)
+    reduced_parameter_vectors = np.full((absorbance_sweeps.shape[0], 8), np.nan, dtype=float)
+    reduced_parameter_covariance = np.full((absorbance_sweeps.shape[0], 8, 8), np.nan, dtype=float)
     rmse_absorbance = np.full(absorbance_sweeps.shape[0], np.nan, dtype=float)
     baseline_offset = np.full(absorbance_sweeps.shape[0], np.nan, dtype=float)
     baseline_slope = np.full(absorbance_sweeps.shape[0], np.nan, dtype=float)
+    confidence_level = float("nan")
+    confidence_scale = float("nan")
 
     for sweep_index, result in enumerate(fit_results):
         if result is None:
@@ -165,12 +193,36 @@ def run_voigt_fit_pipeline(
         success[sweep_index] = result.success
         temperature_k[sweep_index] = result.parameters.temperature_k
         mean_apparent_pressure_atm[sweep_index] = float(np.mean(result.apparent_pressure_atm))
+        temperature_ci95_half_width[sweep_index] = result.temperature_ci_half_width
+        mean_apparent_pressure_ci95_half_width[sweep_index] = result.mean_apparent_pressure_ci_half_width
         line_centers_relative_cm_inv[sweep_index] = result.parameters.line_centers_relative_cm_inv
         collisional_hwhm_cm_inv[sweep_index] = result.parameters.collisional_hwhm_cm_inv
         line_areas[sweep_index] = result.parameters.line_areas
+        line_centers_ci95_half_width[sweep_index] = result.line_centers_ci_half_width
+        collisional_hwhm_ci95_half_width[sweep_index] = result.collisional_hwhm_ci_half_width
+        line_areas_ci95_half_width[sweep_index] = result.line_areas_ci_half_width
+        reduced_parameter_vectors[sweep_index] = result.reduced_parameter_vector
+        reduced_parameter_covariance[sweep_index] = result.reduced_parameter_covariance
         rmse_absorbance[sweep_index] = result.rmse_absorbance
         baseline_offset[sweep_index] = result.parameters.baseline_offset
         baseline_slope[sweep_index] = result.parameters.baseline_slope
+        confidence_level = result.confidence_level
+        confidence_scale = result.confidence_scale
+
+    temperature_ci95_lower = temperature_k - temperature_ci95_half_width
+    temperature_ci95_upper = temperature_k + temperature_ci95_half_width
+    mean_apparent_pressure_ci95_lower = (
+        mean_apparent_pressure_atm - mean_apparent_pressure_ci95_half_width
+    )
+    mean_apparent_pressure_ci95_upper = (
+        mean_apparent_pressure_atm + mean_apparent_pressure_ci95_half_width
+    )
+    line_centers_ci95_lower = line_centers_relative_cm_inv - line_centers_ci95_half_width
+    line_centers_ci95_upper = line_centers_relative_cm_inv + line_centers_ci95_half_width
+    collisional_hwhm_ci95_lower = collisional_hwhm_cm_inv - collisional_hwhm_ci95_half_width
+    collisional_hwhm_ci95_upper = collisional_hwhm_cm_inv + collisional_hwhm_ci95_half_width
+    line_areas_ci95_lower = line_areas - line_areas_ci95_half_width
+    line_areas_ci95_upper = line_areas + line_areas_ci95_half_width
 
     selected_index, selected_result = _select_plot_result(fit_results, plot_sweep_index)
 
@@ -181,10 +233,24 @@ def run_voigt_fit_pipeline(
         fitted_absorbance_sweeps=fitted_absorbance_sweeps,
         success=success,
         temperature_k=temperature_k,
+        temperature_ci95_lower=temperature_ci95_lower,
+        temperature_ci95_upper=temperature_ci95_upper,
         mean_apparent_pressure_atm=mean_apparent_pressure_atm,
+        mean_apparent_pressure_ci95_lower=mean_apparent_pressure_ci95_lower,
+        mean_apparent_pressure_ci95_upper=mean_apparent_pressure_ci95_upper,
         line_centers_relative_cm_inv=line_centers_relative_cm_inv,
+        line_centers_ci95_lower=line_centers_ci95_lower,
+        line_centers_ci95_upper=line_centers_ci95_upper,
         collisional_hwhm_cm_inv=collisional_hwhm_cm_inv,
+        collisional_hwhm_ci95_lower=collisional_hwhm_ci95_lower,
+        collisional_hwhm_ci95_upper=collisional_hwhm_ci95_upper,
         line_areas=line_areas,
+        line_areas_ci95_lower=line_areas_ci95_lower,
+        line_areas_ci95_upper=line_areas_ci95_upper,
+        reduced_parameter_vectors=reduced_parameter_vectors,
+        reduced_parameter_covariance=reduced_parameter_covariance,
+        confidence_level=confidence_level,
+        confidence_scale=confidence_scale,
         baseline_offset=baseline_offset,
         baseline_slope=baseline_slope,
         rmse_absorbance=rmse_absorbance,
@@ -212,9 +278,19 @@ def run_voigt_fit_pipeline(
         success=success,
         temperature_k=temperature_k,
         mean_apparent_pressure_atm=mean_apparent_pressure_atm,
+        temperature_ci95_lower=temperature_ci95_lower,
+        temperature_ci95_upper=temperature_ci95_upper,
+        mean_apparent_pressure_ci95_lower=mean_apparent_pressure_ci95_lower,
+        mean_apparent_pressure_ci95_upper=mean_apparent_pressure_ci95_upper,
         line_centers_relative_cm_inv=line_centers_relative_cm_inv,
         collisional_hwhm_cm_inv=collisional_hwhm_cm_inv,
         line_areas=line_areas,
+        line_centers_ci95_lower=line_centers_ci95_lower,
+        line_centers_ci95_upper=line_centers_ci95_upper,
+        collisional_hwhm_ci95_lower=collisional_hwhm_ci95_lower,
+        collisional_hwhm_ci95_upper=collisional_hwhm_ci95_upper,
+        line_areas_ci95_lower=line_areas_ci95_lower,
+        line_areas_ci95_upper=line_areas_ci95_upper,
         rmse_absorbance=rmse_absorbance,
         plot_sweep_index=selected_index,
     )

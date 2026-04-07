@@ -36,6 +36,8 @@ def test_fit_voigt_spectrum_recovers_synthetic_parameters() -> None:
         baseline_slope=-0.01,
     )
     absorbance, _, _, _ = evaluate_voigt_spectrum(frequency_cm_inv, true_parameters)
+    rng = np.random.default_rng(0)
+    absorbance = absorbance + rng.normal(loc=0.0, scale=1.0e-4, size=absorbance.shape)
 
     fit_result = fit_voigt_spectrum(frequency_cm_inv, absorbance)
 
@@ -64,4 +66,9 @@ def test_fit_voigt_spectrum_recovers_synthetic_parameters() -> None:
     )
     assert fit_result.parameters.line_areas[0] > fit_result.parameters.line_areas[1]
     assert fit_result.parameters.line_areas[1] > fit_result.parameters.line_areas[2]
-    assert fit_result.rmse_absorbance < 1.0e-4
+    assert np.isfinite(fit_result.temperature_ci_half_width)
+    assert fit_result.temperature_ci_half_width > 0.0
+    assert np.all(np.isfinite(fit_result.line_centers_ci_half_width))
+    assert np.all(np.isfinite(fit_result.collisional_hwhm_ci_half_width))
+    assert np.all(np.isfinite(fit_result.line_areas_ci_half_width))
+    assert fit_result.rmse_absorbance < 2.0e-4
