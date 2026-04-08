@@ -18,7 +18,6 @@ from mock_lab.spectroscopy.voigt import (
 
 Array1D = NDArray[np.float64]
 
-IDEAL_GAS_NUMBER_DENSITY_COEFF_CM3 = 101325.0 / 1.380649e-23 / 1.0e6
 DEFAULT_OPTICAL_PATH_LENGTH_CM = 10.32
 DEFAULT_PRESSURE_BROADENING_SCALE = 0.84
 
@@ -58,6 +57,13 @@ def estimate_co_mole_fraction(
 
     The strongest transition is used by default because it is the most stable
     fit target across the current sweep stack.
+
+    This routine assumes the line strength is expressed in `cm^-2/atm`, so the
+    integrated absorbance area obeys
+
+    `Area = S(T) * P * X_CO * L`
+
+    where `Area` is in `cm^-1`, `P` is in `atm`, and `L` is in `cm`.
     """
 
     co_mole_fraction = np.full_like(temperature_k, np.nan, dtype=float)
@@ -76,10 +82,7 @@ def estimate_co_mole_fraction(
             continue
 
         line_strength = line_strength_at_temperature(float(temperature_value), transition)
-        total_number_density_cm3 = (
-            IDEAL_GAS_NUMBER_DENSITY_COEFF_CM3 * float(pressure_value) / float(temperature_value)
-        )
-        denominator = total_number_density_cm3 * optical_path_length_cm * line_strength
+        denominator = float(pressure_value) * optical_path_length_cm * line_strength
 
         if denominator > 0.0:
             co_mole_fraction[index] = float(area_value / denominator)

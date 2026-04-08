@@ -1,367 +1,341 @@
 # ME 617 Mock Lab
 
-Python analysis workspace for the ME 617 scanned-wavelength direct-absorption mock lab. This repository processes the provided baseline, etalon, and shock-tube MATLAB datasets into calibrated absorbance spectra, fits those spectra with a three-transition CO Voigt model, and then reduces the fit results to temperature, pressure, and CO mole-fraction histories.
+This repository is the current Python reduction, fitting, and reporting workflow for the ME 617 scanned-wavelength direct-absorption mock lab. It takes the provided baseline, etalon, and shock-tube MATLAB datasets and reduces them into:
 
-This README is meant to be the practical map for the codebase. It explains the current implementation stage by stage, points to the exact files that own each step, and calls out the main assumptions and fit parameters so you can decide where to start editing when you want to change one part of the analysis.
+- phase-aligned sweeps
+- a relative time-to-wavenumber calibration from the etalon scan
+- baseline-corrected absorbance spectra
+- constrained three-transition CO Voigt fits
+- scan-by-scan temperature, pressure, and CO mole-fraction histories
+- approximate 95% confidence intervals on the fitted and reported quantities
 
-## Repo Map
+The code is not intended to be a general spectroscopy package. It is a pragmatic analysis codebase for this specific assignment, dataset structure, and transition set.
 
-The files that matter most for the current workflow are:
+## What The Current Code Does
 
-- `src/mock_lab/io/matlab_loader.py`: load MAT files, reconstruct time, and split the continuous traces into phase-aligned sweeps
-- `src/mock_lab/spectroscopy/etalon_calibration.py`: etalon baseline removal, representative-sweep averaging, peak picking, and polynomial time-to-frequency calibration
-- `src/mock_lab/spectroscopy/absorbance.py`: baseline wing fitting, line subtraction, peak scaling, absorbance-window selection, and Beer-Lambert absorbance
-- `src/mock_lab/spectroscopy/voigt.py`: three-transition Voigt model, initial guesses, bounds, and nonlinear least-squares fitting
-- `src/mock_lab/spectroscopy/state_estimation.py`: convert fitted line parameters into temperature, pressure, and CO mole fraction
-- `src/mock_lab/spectroscopy/tips.py`: local HITRAN TIPS partition-sum lookup used by the state-estimation layer
-- `third_party/hitran_tips/`: vendored HITRAN TIPS script and partition-sum tables
-- `src/mock_lab/plotting/figures.py`: all report-style plotting helpers
-- `src/mock_lab/pipelines/etalon.py`: end-to-end etalon calibration pass
-- `src/mock_lab/pipelines/shock_snapshot.py`: build the baseline-corrected and absorbance-domain shock spectra
-- `src/mock_lab/pipelines/voigt_fit.py`: fit all absorbance sweeps with the three-line Voigt model
-- `src/mock_lab/pipelines/time_history.py`: reduce the fitted sweeps into a scan-by-scan state history
-- `scripts/run_report_figures.py`: rebuild the figure set used for the report
-- `scripts/run_voigt_fit.py`: rebuild spectra and run the Voigt fits
-- `scripts/run_time_history.py`: rebuild everything through state history
-- `scripts/run_voigt_fit_video.py`: fit all scans and build a QC video of the spectrum fits
+The active workflow is:
 
-There are also two older placeholder pipelines that are not the active implementation path right now:
+1. Load each MAT file and identify the detector and TTL-like reference channels.
+2. Reconstruct the sample time axis from the reference waveform.
+3. Split each continuous trace into phase-aligned sweeps, discarding the leading incomplete sweep.
+4. Use the etalon dataset to build a relative frequency calibration.
+5. Use the baseline dataset to build an average baseline sweep.
+6. Convert each shock sweep into a baseline-corrected absorbance spectrum.
+7. Fit each absorbance spectrum with a constrained sum of three CO Voigt profiles.
+8. Convert the fitted parameters into temperature, pressure, and CO mole fraction.
+9. Estimate local covariance-based 95% confidence intervals from the least-squares Jacobian and propagate them into the reported state variables.
 
-- `src/mock_lab/pipelines/baseline.py`
-- `src/mock_lab/pipelines/full_pipeline.py`
-
-The `data/` tree is now reserved for experimental inputs and generated analysis products. The local HITRAN TIPS resources are kept under `third_party/hitran_tips/` because they are vendored reference assets, not raw lab data.
-
-## Recommended Entry Points
-
-Run the code from the repo root with the local virtual environment:
-
-```bash
-.venv/bin/python scripts/run_report_figures.py
-.venv/bin/python scripts/run_voigt_fit.py
-.venv/bin/python scripts/run_time_history.py
-.venv/bin/python scripts/run_voigt_fit_video.py
-```
-
-The wrapper scripts are the easiest place to change which dataset is used, where outputs are written, and which sweep index is plotted. For example, `scripts/run_report_figures.py` currently uses `plot_sweep_index=60` when building the report figures.
-
-## End-to-End Workflow
-
-### 1. Load MATLAB data and reconstruct time
-
-The raw datasets live in:
+The main raw inputs are:
 
 - `data/raw/MockLabData_Baseline.mat`
 - `data/raw/MockLabData_Etalon.mat`
 - `data/raw/MockLabData_Shock.mat`
 
-The loading logic is in `src/mock_lab/io/matlab_loader.py`.
+The local HITRAN partition-sum tables used by the spectroscopy code are vendored under:
 
-Current behavior:
+- `third_party/hitran_tips/`
 
-- `load_mat_trace()` reads one `.mat` file with `scipy.io.loadmat`, identifies the detector channel and the TTL-like reference channel, and returns a `MatlabTrace` dataclass.
-- `binarize_reference()` thresholds the analog reference waveform into a binary waveform.
-- `get_time()` finds rising edges in the reference signal, estimates the number of samples per sweep from the median edge spacing, and reconstructs the sample period assuming `DEFAULT_REFERENCE_FREQUENCY_HZ = 300_000.0`.
-- `split_samples()` cuts the continuous signal into equal-length sweeps after applying the phase offset `DEFAULT_PHASE_START_S = 2.2e-6`.
-- `split_trace()` applies the same sweep extraction to both the detector and reference channels and returns a `SweepCollection`.
+## Reduction Summary
 
-Important implementation detail:
+### MAT Loading And Sweep Alignment
 
-- The code intentionally discards the leading partial sweep by starting at `t0 = 2.2 us`.
-- Each extracted sweep therefore starts with a little baseline, contains the ramp, and ends with baseline again.
-- The local sweep time returned by `split_trace()` still starts at `t0`, not at `0`.
-- Some plotting code later subtracts that offset for display only.
+`src/mock_lab/io/matlab_loader.py` owns the raw-data handling.
 
-If you want to change how the raw data are cut up, start in `src/mock_lab/io/matlab_loader.py`.
+The current implementation:
 
-### 2. Build the etalon time-to-frequency calibration
+- loads each `.mat` file with `scipy.io.loadmat`
+- identifies one signal channel and one reference channel
+- thresholds the reference channel to recover a binary sweep marker
+- detects rising edges and infers the sample period from the reference frequency
+- assumes `DEFAULT_REFERENCE_FREQUENCY_HZ = 300000.0`
+- applies a fixed phase offset of `DEFAULT_PHASE_START_S = 2.2e-6`
+- reshapes the continuous traces into phase-aligned sweeps
 
-The active etalon pipeline is `src/mock_lab/pipelines/etalon.py`.
+The phase offset is intentional. The code throws away the partial leading sweep and keeps each extracted sweep starting with a small amount of baseline, then the ramp, then a small amount of trailing baseline. That is the working assumption throughout the rest of the repo.
 
-It does the following:
+### Etalon Calibration
 
-1. Loads `data/raw/MockLabData_Etalon.mat`
-2. Splits the detector signal into phase-aligned sweeps with `split_trace()`
-3. Removes a simple edge baseline from every sweep with `remove_edge_baseline()` in `src/mock_lab/spectroscopy/etalon_calibration.py`
-4. Averages all corrected sweeps into one low-noise representative sweep with `build_representative_sweep()`
-5. Detects the etalon peaks on that averaged sweep with `find_etalon_peaks()`
-6. Assigns equally spaced relative wavenumbers to those peaks using the etalon free spectral range
-7. Fits a polynomial mapping time to relative wavenumber with `fit_relative_wavenumber()`
-8. Saves the calibration to `data/interim/etalon/etalon_fit.npz`
-9. Builds the figure outputs `results/figures/etalon_sweep.png` and `results/figures/etalon_calibration.png`
+The etalon reduction is implemented in:
 
-The etalon physics and fitting helpers are in `src/mock_lab/spectroscopy/etalon_calibration.py`.
+- `src/mock_lab/spectroscopy/etalon_calibration.py`
+- `src/mock_lab/pipelines/etalon.py`
 
-Key assumptions in the current etalon implementation:
+The current etalon workflow:
 
-- The etalon free spectral range is fixed by:
-  - `ETALON_LENGTH_CM = 3.0 * 2.54`
-  - `ETALON_REFRACTIVE_INDEX = 4.019`
-  - `ETALON_FSR_CM_INV = 1 / (2 n L)`
-- Peak spacing is assumed uniform in relative wavenumber.
-- The current pipeline default in `src/mock_lab/pipelines/etalon.py` is `polynomial_order=4`.
-- The lower residual panel in the calibration plot is just a diagnostic of the polynomial fit at the detected peak locations.
+- removes a simple edge baseline from each etalon sweep
+- averages all corrected sweeps into one representative sweep
+- detects the etalon peaks on that averaged trace
+- assigns equally spaced relative wavenumbers using the fixed etalon free spectral range
+- fits a polynomial mapping sweep time to relative wavenumber
 
-Files to edit if you want to change the etalon behavior:
+The calibration is relative, not absolute. The shock spectra are therefore placed on a relative wavenumber axis rather than an absolute line-center scale.
 
-- Change peak detection thresholds: `src/mock_lab/spectroscopy/etalon_calibration.py`
-- Change the fit order or which run script uses which order: `src/mock_lab/pipelines/etalon.py`
-- Change the look of the figure: `src/mock_lab/plotting/figures.py`
+At the moment the pipeline default in `src/mock_lab/pipelines/etalon.py` is a 4th-order polynomial fit.
 
-Note on plotting:
+### Baseline And Shock Absorbance Reduction
 
-- The fit itself is evaluated on the local sweep time axis that starts at `2.2 us`.
-- The displayed etalon time axis is shifted to start at `0` in `src/mock_lab/pipelines/etalon.py`.
+The shock preprocessing is implemented in:
 
-### 3. Build the average baseline and shock absorbance spectra
+- `src/mock_lab/spectroscopy/absorbance.py`
+- `src/mock_lab/pipelines/shock_snapshot.py`
 
-The active shock preprocessing pipeline is `src/mock_lab/pipelines/shock_snapshot.py`.
+The current reduction choices are:
 
-This is where the baseline dataset and the shock dataset are combined.
+- baseline sweeps are averaged before use
+- the average baseline is corrected with a straight line fit through the first and last 32 samples
+- each shock sweep is corrected the same way
+- each corrected shock sweep is scaled so its peak matches the peak of the corrected average baseline
+- absorbance is computed as `A = -ln(I / I0)` under the assumption that detector voltage is linear in optical power
+- the absorbance window starts once the corrected average baseline reaches 1.0 V and ends once it exceeds 2.75 V
 
-Current behavior:
+This means the code is intentionally excluding the low-signal early part of the ramp, where the absorbance estimate becomes noisy because the signal-to-noise ratio is poor and no useful absorbance should be reported there anyway.
 
-1. Load the saved etalon calibration from `data/interim/etalon/etalon_fit.npz`
-2. Load the baseline MAT file and split it into sweeps
-3. Average all baseline sweeps with `average_sweeps()` from `src/mock_lab/spectroscopy/absorbance.py`
-4. Fit a straight line through the first and last `32` samples of that average baseline sweep with `fit_edge_line()`
-5. Subtract that fitted line from the average baseline with `subtract_edge_line()`
-6. Load the shock MAT file and split it into sweeps
-7. Fit and subtract the same kind of wing line from every shock sweep with `fit_edge_lines()` and `subtract_edge_lines()`
-8. Scale each corrected shock sweep so its peak matches the peak of the corrected average baseline with `scale_sweeps_to_reference_peak()`
-9. Convert the sweep time axis into relative wavenumber by evaluating the etalon polynomial with `evaluate_relative_wavenumber()`
-10. Select the absorbance-analysis window with `find_analysis_window()`
-11. Compute Beer-Lambert absorbance with `beer_lambert_absorbance()`
-12. Save the processed output to `data/processed/exports/shock_frequency_domain.npz`
-13. Save the average baseline to `data/interim/baseline/baseline_average.npz`
-14. Write the overlay and absorbance figures to `results/figures/`
+## Spectral Fit Summary
 
-The main absorbance helpers are all in `src/mock_lab/spectroscopy/absorbance.py`.
+The spectral fit is implemented in:
 
-Current absorbance assumptions:
+- `src/mock_lab/spectroscopy/voigt.py`
+- `src/mock_lab/pipelines/voigt_fit.py`
 
-- The baseline correction is a line fit through the two sweep "wings" rather than a constant offset.
-- The wing width is fixed at `32` samples on each end of the sweep.
-- The corrected shock sweep is scaled so its peak equals the peak of the corrected average baseline sweep.
-- Absorbance is computed as `A = -ln(I / I0)`, assuming the detector voltage is proportional to optical power.
-- The analysis window begins at or after sample `32` where the corrected average baseline first reaches `1.0 V`.
-- The analysis window ends when the corrected average baseline exceeds `2.75 V`.
-- Outside that window, the absorbance array is left as `nan`.
+The active Python implementation uses:
 
-Important output fields in `data/processed/exports/shock_frequency_domain.npz`:
+- `scipy.special.voigt_profile` for direct Voigt line-shape evaluation
+- `scipy.optimize.least_squares` for the nonlinear fit
 
-- `time_axis_s`
-- `relative_wavenumber_cm_inv`
-- `corrected_baseline_sweep`
-- `corrected_signal_sweeps`
-- `scaled_signal_sweeps`
-- `absorbance_sweeps`
-- `scale_factors`
-- `etalon_coefficients`
+The legacy MATLAB McLean approximation is kept only in `examples/matlab_voigt_demo/` as a reference from the course handout. It is not used by the Python workflow.
 
-Files to edit if you want to change the shock preprocessing:
+### Transitions Used
 
-- Change the wing-fit or absorbance window logic: `src/mock_lab/spectroscopy/absorbance.py`
-- Change how baseline and shock data are combined or which figures are generated: `src/mock_lab/pipelines/shock_snapshot.py`
-- Change the time-domain or frequency-domain plot style: `src/mock_lab/plotting/figures.py`
-
-Note on plotting:
-
-- The baseline/shock overlay plot uses a time axis shifted to start at `0`.
-- The shock absorbance time plot still uses the local sweep time values from the extracted analysis window.
-
-### 4. Fit each absorbance sweep with three Voigt profiles
-
-The current spectral model is implemented in `src/mock_lab/spectroscopy/voigt.py`, and the batch pipeline is `src/mock_lab/pipelines/voigt_fit.py`.
-
-The transition metadata are hard-coded in `DEFAULT_CO_TRANSITIONS` in `src/mock_lab/spectroscopy/voigt.py` using the three lines from the handout:
+The three handout transitions are hard-coded in `DEFAULT_CO_TRANSITIONS` inside `src/mock_lab/spectroscopy/voigt.py`:
 
 - `P(0,31)`
 - `P(2,20)`
 - `P(3,14)`
 
-The fitting model is:
+Each transition stores:
 
-- total absorbance = sum of three Voigt profiles + linear baseline
+- `center_cm_inv`
+- `line_strength_ref`
+- `lower_state_energy_cm_inv`
+- `gamma_n2_cm_inv_atm`
+- `n_n2`
+- `gamma_co_cm_inv_atm`
+- `n_co`
 
-The current optimizer uses a constrained parameterization for each fitted sweep. The free quantities are:
+`line_strength_ref` is not kept in raw HITRAN units. The conversion to
+`cm^-2/atm` is applied immediately in
+`src/mock_lab/spectroscopy/voigt.py` by
+`hitran_line_strength_to_cm2_atm()`, using
+
+- `S_ref = S_hitran * P_atm / (k_B * T_ref)`
+
+with `P_atm = 1.01325e6 dyn/cm^2` and `k_B` in CGS. At `296 K`, this is the
+same as multiplying by approximately `2.4794e19`.
+
+So from the point where `DEFAULT_CO_TRANSITIONS` is defined onward, the code
+stores and uses reference line strengths in `cm^-2/atm`.
+
+These values drive both the fit model and the later state-reduction formulas.
+
+### Model Form
+
+Each line is modeled as
+
+- `A_i(nu) = Area_i * Voigt(nu - nu0_i, sigmaD_i(T), gammaL_i)`
+
+where:
+
+- `nu0_i` is the line center
+- `sigmaD_i(T)` is the Doppler Gaussian width set by the shared fitted temperature
+- `gammaL_i` is the collisional Lorentz half-width
+- `Area_i` is the integrated absorbance area of the line
+
+The total model is the sum of the three line absorbances plus a linear baseline.
+
+### Why The Fit Is Constrained
+
+The current fitter is intentionally not a fully free three-line Voigt fit.
+
+When all three centers, widths, and areas are allowed to float independently, the optimizer tends to swap which transition is assigned to the dominant peak and which transition is assigned to the smaller shoulder. The current implementation constrains the model to stop that line-identity swapping.
+
+The present reduced parameterization is:
 
 - one shared temperature `temperature_k`
 - one anchor center for `P(0,31)`
 - one small center adjustment for `P(2,20)` relative to its nominal offset from `P(0,31)`
 - one collisional half-width for `P(0,31)`
 - one shared collisional half-width for `P(2,20)` and `P(3,14)`
-- one integrated area for the strongest line `P(0,31)`
+- one integrated area for `P(0,31)`
 - one linear baseline offset
 - one linear baseline slope
 
-The stored fit result is still expanded back into explicit per-line centers, widths, and areas so the saved output files remain easy to inspect.
+The explicit stored line parameters are expanded back out after the fit, so the saved results still contain all three centers, widths, and areas even though the optimizer works on the smaller constrained vector.
 
-The current fixed ingredients are:
+### Why Only One Free Integrated Area Is Fitted
 
-- the number of transitions: 3
-- the transition metadata in `DEFAULT_CO_TRANSITIONS`
-- the molecular mass used for Doppler broadening
-- the Voigt profile functional form from `scipy.special.voigt_profile`
-- optimizer bounds built in `_parameter_bounds()`
-- the optimization method in `fit_voigt_spectrum()`
-- the fixed center offset of `P(3,14)` from `P(0,31)`
-- the shared collisional width constraint between `P(2,20)` and `P(3,14)`
-- the temperature-dependent line-strength ratios that tie all three integrated areas to the strongest line area
+Only the strongest line area, `line_areas[0]`, is fitted freely.
 
-The actual nonlinear fit is done with `scipy.optimize.least_squares` in `fit_voigt_spectrum()` using:
+That is a deliberate modeling choice, not an omission.
 
-- `method="trf"`
-- `loss="soft_l1"`
-- `f_scale=0.01`
-- `max_nfev=1500`
+The reasoning is:
 
-Uncertainty on the fitted quantities is currently estimated from the local least-squares Jacobian at the optimum:
+- the three transitions strongly overlap
+- the weaker lines are much more prone to unstable area swapping if they are left fully free
+- the relative line strengths are not arbitrary once temperature is specified
 
-- `src/mock_lab/spectroscopy/voigt.py` builds an approximate reduced-parameter covariance from the fitted Jacobian
-- that covariance is propagated to the reported temperature, line centers, line widths, line areas, and mean apparent pressure with a local linearization
-- the current exported intervals are approximate two-sided `95%` confidence intervals
+So the code uses the spectroscopy to tie the three areas together:
 
-How the fit is initialized:
+- `line_strength_at_temperature()` in `src/mock_lab/spectroscopy/voigt.py` evaluates the temperature-dependent line strength for each transition in `cm^-2/atm`
+- `transition_strength_ratios()` converts those line strengths into ratios relative to `P(0,31)`
+- the optimizer fits only the strongest-line area
+- the other two line areas are derived from that strongest-line area and the temperature-dependent line-strength ratios
 
-- `estimate_initial_parameters()` first fits a line to the spectrum edges to estimate a baseline.
-- The strongest peak in the baseline-corrected absorbance is used to seed the `P(0,31)` anchor center.
-- The handout transition center spacings are used to seed the weaker lines.
-- `P(2,20)` gets one local refinement near its nominal position.
-- `P(3,14)` is kept at its nominal offset from the anchor line from the start.
-- The strong-line and weak-line collisional width guesses are both initialized at `0.04 cm^-1`.
-- The strongest-line area is seeded from an approximate peak-height-to-area conversion with `integrated_area_guess()`.
-- The weaker line areas are then derived from temperature-dependent line-strength ratios instead of being guessed independently.
+So the one fitted area should be read as the overall integrated absorbance scale of the CO spectrum for that sweep. It is not itself temperature, pressure, or mole fraction. It becomes useful for the final reported state only after the code combines it with the fitted temperature, corrected pressure, the `cm^-2/atm` line-strength model, and the optical path length.
 
-How sweep-to-sweep fitting works:
+### Which Free Parameters Drive Which Final Quantities
 
-- `fit_voigt_spectra()` in `src/mock_lab/spectroscopy/voigt.py` loops over the absorbance sweeps in order.
-- Sweeps with too little usable signal are skipped if their peak absorbance is below `minimum_peak_absorbance=0.02`.
-- The previous successful fit is used as the initial guess for the next sweep.
+The main fit quantities do not all feed the final reported state variables in the same way.
 
-This means the current fitter behaves like a sequential, warm-started least-squares pass rather than fully independent fits on every scan, while also keeping the three transition identities from swapping when the peaks overlap strongly.
+`temperature_k`
 
-Important fit outputs written by `src/mock_lab/pipelines/voigt_fit.py`:
+- directly becomes the reported scan temperature
+- sets the Doppler width of every line
+- sets the temperature-dependent line-strength ratios
+- enters the linewidth-to-pressure conversion through the broadening temperature law
+- enters the mole-fraction calculation through the temperature-dependent line strength
 
-- `data/processed/exports/voigt_fit_results.npz`
-- `results/tables/voigt_fit_summary.csv`
-- `results/figures/shock_voigt_fit.png`
+`collisional_hwhm_cm_inv`
 
-The saved arrays include:
+- is converted to per-line apparent pressure in `apparent_pressure_atm()`
+- is the main driver of the reported pressure
+- only affects mole fraction indirectly through the pressure estimate
 
-- fitted absorbance sweeps
-- success flags
-- fitted temperatures
-- fitted temperature confidence intervals
-- mean apparent pressures
-- mean apparent pressure confidence intervals
-- fitted line centers
-- fitted line-center confidence intervals
-- fitted collisional widths
-- fitted collisional-width confidence intervals
-- fitted line areas
-- fitted line-area confidence intervals
-- RMSE values
+`line_areas`
 
-If you want the current Python fit to look more or less like the MATLAB demo, compare:
+- are integrated absorbance areas, not temperatures or pressures
+- `line_areas[0]` is the magnitude parameter that ultimately feeds CO mole fraction
+- the weaker line areas are derived from `line_areas[0]` and the temperature-dependent ratios
 
-- `src/mock_lab/spectroscopy/voigt.py`
-- `examples/matlab_voigt_demo/Demo_Absorbance_Fit.m`
-- `examples/matlab_voigt_demo/Voigt_Approx_McLean_Vectorized_Fit_Demo.m`
-- `examples/matlab_voigt_demo/get_IntArea_guess.m`
+`line_centers_relative_cm_inv`
 
-Files to edit if you want to change the spectral fit:
+- primarily improve the alignment of the fit to the measured spectrum
+- matter for fit quality and diagnostic interpretation
+- are not used directly in the present `T`, `P`, or `X_CO` calculations
 
-- Change the fixed transition list or spectroscopic constants: `src/mock_lab/spectroscopy/voigt.py`
-- Change initial guesses, bounds, or fit parameterization: `src/mock_lab/spectroscopy/voigt.py`
-- Change batch-fitting behavior or output tables: `src/mock_lab/pipelines/voigt_fit.py`
-- Change the diagnostic fit figure: `src/mock_lab/plotting/figures.py`
+`baseline_offset` and `baseline_slope`
 
-### 5. Reduce the fit results to temperature, pressure, and CO mole fraction
+- are nuisance parameters that absorb small broadband baseline mismatch
+- are not used directly in the final reported state variables
 
-The current state-reduction logic is in `src/mock_lab/spectroscopy/state_estimation.py`, and the wrapper pipeline is `src/mock_lab/pipelines/time_history.py`.
+### Current Structural Assumptions In The Fit
 
-Current behavior:
+The current fit also enforces two handout-motivated structural constraints:
 
-1. Load the saved Voigt fit results from `data/processed/exports/voigt_fit_results.npz`
-2. Use the fitted shared temperature directly as the scan temperature
-3. Compute one apparent pressure for each line from its fitted collisional width with `apparent_pressure_atm()` in `src/mock_lab/spectroscopy/voigt.py`
-4. Average those three apparent pressures per scan in `src/mock_lab/pipelines/voigt_fit.py`
-5. Apply the handout-style correction factor `DEFAULT_PRESSURE_BROADENING_SCALE = 0.84` in `corrected_pressure_from_broadening()`
-6. Estimate CO mole fraction from the integrated area of the strongest line only, using `estimate_co_mole_fraction()`
-7. Propagate the saved fit covariance into approximate `95%` confidence intervals on temperature, corrected pressure, and CO mole fraction
-8. Save the history arrays to `results/tables/state_history.csv` and `results/tables/state_history.npz`
-9. Save the plot `results/figures/state_history.png`
+- `P(3,14)` stays at a fixed center offset from `P(0,31)`
+- `P(2,20)` and `P(3,14)` share the same collisional width
 
-Partition sums:
+So the current Python fit is best thought of as a physically stabilized three-line fit, not a completely free one.
 
-- The code no longer uses the earlier RRHO approximation.
-- `src/mock_lab/spectroscopy/tips.py` reads the local HITRAN TIPS tables from `third_party/hitran_tips/`.
-- `src/mock_lab/spectroscopy/voigt.py` now owns the temperature-dependent line-strength helper and uses the local TIPS data when evaluating `Q(T) / Q(T_ref)`.
-- `src/mock_lab/spectroscopy/state_estimation.py` reuses that shared spectroscopy helper when converting fitted line area into CO mole fraction.
+### Initialization And Sweep Ordering
 
-Current state-estimation assumptions:
+The fit is initialized by:
 
-- Pressure is inferred from fitted collisional widths using the `gamma_n2` and `n_n2` values stored in `DEFAULT_CO_TRANSITIONS`.
-- The three line pressures are averaged before the `0.84` correction factor is applied.
-- CO mole fraction is estimated from the strongest line area only.
-- The optical path length is fixed by `DEFAULT_OPTICAL_PATH_LENGTH_CM = 10.32`.
-- The ideal-gas number-density relation is used to map pressure and temperature to total number density.
-- The exported uncertainty bands are local covariance-based intervals, not a full Bayesian posterior or bootstrap result.
+- estimating a linear baseline from the spectrum edges
+- seeding the anchor center from the dominant measured peak
+- seeding `P(2,20)` near its nominal offset and refining it locally
+- keeping `P(3,14)` at its nominal offset from the anchor line
+- seeding the strongest line area from an approximate peak-to-area conversion
+- deriving the weaker areas from the temperature-dependent strength ratios
 
-Files to edit if you want to change the final derived quantities:
+The batch fit is warm-started:
 
-- Change partition-sum handling: `src/mock_lab/spectroscopy/tips.py`
-- Change line-strength or mole-fraction calculation: `src/mock_lab/spectroscopy/state_estimation.py`
-- Change the state-history pipeline outputs: `src/mock_lab/pipelines/time_history.py`
-- Change the state-history plot: `src/mock_lab/plotting/figures.py`
+- weak spectra can be skipped if their peak absorbance is below the configured threshold
+- the previous successful sweep fit is used as the initial guess for the next sweep
 
-### 6. Build a QC video of the fit progression
+That is why the fit behaves as a sequential time-history reduction rather than a collection of independent single-spectrum fits.
 
-If you want a fast way to inspect the fit quality scan by scan, use:
+## State-Reduction Summary
 
-- `scripts/run_voigt_fit_video.py`
+The state-reduction code is implemented in:
 
-This rebuilds the precursor products, fits all sweeps, and then renders a video with:
+- `src/mock_lab/spectroscopy/state_estimation.py`
+- `src/mock_lab/pipelines/time_history.py`
 
-- measured absorbance
-- fitted total spectrum
-- the three component spectra
-- dotted vertical center markers for the fitted line positions
-- residual
-- scan annotation with sweep index, fit status, fitted temperature, and RMSE
+The current reported quantities are built as follows:
 
-The video intentionally does not annotate pressure right now.
+- temperature is taken directly from the fitted shared temperature
+- apparent pressure is computed from the fitted collisional widths using the tabulated `gamma_n2` and `n_n2` values
+- the three apparent pressures are averaged
+- the mean apparent pressure is scaled by `1 / 0.84` to form the reported pressure
+- CO mole fraction is estimated from the strongest fitted line area only
 
-The video renderer lives in `src/mock_lab/pipelines/voigt_fit_video.py`, and the output is written to `results/videos/shock_voigt_fit_progression.mp4`.
+The strongest-line area is converted to mole fraction using:
 
-## Where To Start If You Want To Change One Thing
+- the fitted temperature
+- the corrected pressure
+- the optical path length
+- the temperature-dependent line strength `S(T)`
 
-Use this as the shortest route to the right file:
+Because the stored line strengths are already in `cm^-2/atm`, the reduction is
+written directly as
 
-| If you want to change... | Start here |
-|---|---|
-| MAT variable loading or time reconstruction | `src/mock_lab/io/matlab_loader.py` |
-| Where sweeps start and how incomplete ramps are discarded | `src/mock_lab/io/matlab_loader.py` |
-| How the etalon peaks are detected | `src/mock_lab/spectroscopy/etalon_calibration.py` |
-| The order of the etalon polynomial fit | `src/mock_lab/pipelines/etalon.py` |
-| The etalon FSR constants | `src/mock_lab/spectroscopy/etalon_calibration.py` |
-| How the baseline wing line is fit or subtracted | `src/mock_lab/spectroscopy/absorbance.py` |
-| The absorbance voltage window (`1.0 V` to `2.75 V`) | `src/mock_lab/spectroscopy/absorbance.py` |
-| The peak scaling between baseline and shock sweeps | `src/mock_lab/spectroscopy/absorbance.py` |
-| How the shock preprocessing is wired together | `src/mock_lab/pipelines/shock_snapshot.py` |
-| Which transitions are fit | `src/mock_lab/spectroscopy/voigt.py` |
-| Which fit parameters are free and what bounds they have | `src/mock_lab/spectroscopy/voigt.py` |
-| How weak scans are skipped | `src/mock_lab/spectroscopy/voigt.py` and `src/mock_lab/pipelines/voigt_fit.py` |
-| How pressure is derived from linewidth | `src/mock_lab/spectroscopy/voigt.py` and `src/mock_lab/spectroscopy/state_estimation.py` |
-| How CO mole fraction is derived from fitted area | `src/mock_lab/spectroscopy/state_estimation.py` |
-| Partition sums and TIPS access | `src/mock_lab/spectroscopy/tips.py` |
-| Plot formatting and labels | `src/mock_lab/plotting/figures.py` |
-| Which sweep is shown in the report figures | `scripts/run_report_figures.py` |
+- `Area = S(T) * P * X_CO * L`
 
-## Current Output Files
+with:
 
-The main generated products are:
+- `Area` in `cm^-1`
+- `S(T)` in `cm^-2/atm`
+- `P` in `atm`
+- `L` in `cm`
+
+So the reported mole fraction is computed in
+`src/mock_lab/spectroscopy/state_estimation.py` as
+
+- `X_CO = Area / (S(T) * P * L)`
+
+The current optical path length is fixed in `src/mock_lab/spectroscopy/state_estimation.py` as `DEFAULT_OPTICAL_PATH_LENGTH_CM = 10.32`.
+
+## TIPS And Spectroscopy Support
+
+The local partition sums are accessed through:
+
+- `src/mock_lab/spectroscopy/tips.py`
+
+which reads the vendored HITRAN TIPS resources from:
+
+- `third_party/hitran_tips/`
+
+The line-strength model used in the fit and in the mole-fraction calculation is
+therefore consistent with the same local TIPS data and the same handout
+transition metadata. The temperature scaling applied in
+`line_strength_at_temperature()` is
+
+- `S(T) = S(T0) * Q(T0)/Q(T) * T0/T * exp[-c2 E'' (1/T - 1/T0)]`
+- `       * (1 - exp[-c2 nu0 / T]) / (1 - exp[-c2 nu0 / T0])`
+
+which matches the pressure-normalized `cm^-2/atm` convention used by the rest
+of the reduction.
+
+## Uncertainty Summary
+
+The current uncertainty treatment is a local covariance approach based on the fitted Jacobian.
+
+In `src/mock_lab/spectroscopy/voigt.py`:
+
+- the `least_squares` Jacobian is used to estimate a reduced-parameter covariance matrix
+- that covariance is propagated to the expanded fit quantities with a local linearization
+- approximate two-sided 95% confidence intervals are exported for temperature, line centers, collisional widths, line areas, and mean apparent pressure
+
+In `src/mock_lab/pipelines/time_history.py`:
+
+- the saved fit covariance is propagated into the reported temperature, corrected pressure, and CO mole fraction
+- the state-history figure is drawn with shaded 95% confidence bands
+
+This is a reasonable first uncertainty estimate, but it is still a local linearized approximation. It is not a bootstrap, Monte Carlo, or full Bayesian posterior.
+
+## Main Generated Outputs
+
+The current workflow writes the main intermediate and report products to:
 
 - `data/interim/etalon/etalon_fit.npz`
 - `data/interim/baseline/baseline_average.npz`
@@ -379,57 +353,37 @@ The main generated products are:
 - `results/tables/state_history.npz`
 - `results/videos/shock_voigt_fit_progression.mp4`
 
-## Where The Three Transition Constants Live
+## Code Ownership By Module
 
-The spectroscopic constants from the handout for `P(0,31)`, `P(2,20)`, and `P(3,14)` are currently stored in one place:
+If one part of the workflow needs to change, these are the primary files to touch:
 
-- `src/mock_lab/spectroscopy/voigt.py` in `DEFAULT_CO_TRANSITIONS`
+- `src/mock_lab/io/matlab_loader.py`: MAT loading, timing reconstruction, sweep cutting
+- `src/mock_lab/spectroscopy/etalon_calibration.py`: etalon peak finding and polynomial calibration
+- `src/mock_lab/spectroscopy/absorbance.py`: baseline wing correction, scaling, absorbance windowing
+- `src/mock_lab/spectroscopy/voigt.py`: spectral model, fit parameterization, uncertainty on fit quantities
+- `src/mock_lab/spectroscopy/state_estimation.py`: pressure and mole-fraction reduction
+- `src/mock_lab/spectroscopy/tips.py`: local partition-sum access
+- `src/mock_lab/pipelines/shock_snapshot.py`: end-to-end baseline/shock preprocessing
+- `src/mock_lab/pipelines/voigt_fit.py`: batch fitting, fit-result export, fit summary table
+- `src/mock_lab/pipelines/time_history.py`: propagated uncertainty on `T`, `P`, and `X_CO`
+- `src/mock_lab/plotting/figures.py`: all report-style plotting
 
-Each `Transition` entry holds:
+## Wrapper Scripts
 
-- `center_cm_inv`
-- `line_strength_ref`
-- `lower_state_energy_cm_inv`
-- `gamma_n2_cm_inv_atm`
-- `n_n2`
-- `gamma_co_cm_inv_atm`
-- `n_co`
+The main entry points are:
 
-Those values are used in two main parts of the code:
+- `scripts/run_report_figures.py`
+- `scripts/run_voigt_fit.py`
+- `scripts/run_time_history.py`
+- `scripts/run_voigt_fit_video.py`
 
-- `src/mock_lab/spectroscopy/voigt.py`
-  - `center_cm_inv` is used for Doppler-width calculations and to seed the initial line-center guesses
-  - `line_strength_ref`, `lower_state_energy_cm_inv`, and `center_cm_inv` are used in the temperature-dependent line-strength ratios that tie the fitted line areas together
-  - `gamma_n2_cm_inv_atm` and `n_n2` are used to convert fitted Lorentz widths into apparent pressures
-- `src/mock_lab/spectroscopy/state_estimation.py`
-  - the strongest transition, `DEFAULT_CO_TRANSITIONS[0]`, is used by default when converting fitted integrated area into CO mole fraction
-  - the actual line-strength evaluation is imported from `src/mock_lab/spectroscopy/voigt.py` so the spectroscopy stays consistent between fitting and post-processing
+They are thin wrappers around the underlying package code and are the easiest place to change dataset paths, output locations, or which representative sweep is shown in the figures.
 
-So if you want to edit the handout spectroscopic inputs themselves, start in `src/mock_lab/spectroscopy/voigt.py`. If you want to change how those constants are used after the fit, start in `src/mock_lab/spectroscopy/state_estimation.py`.
+## Current Limitations
 
-## Tests
-
-The current tests live in `tests/` and can be run with:
-
-```bash
-.venv/bin/python -m pytest -q
-```
-
-They cover MAT loading, sweep extraction, TIPS access, Voigt fitting, and state estimation.
-
-## Known Simplifications And Caveats
-
-- `src/mock_lab/pipelines/baseline.py` is still a placeholder. The real baseline handling currently lives inside `src/mock_lab/pipelines/shock_snapshot.py`.
-- `src/mock_lab/pipelines/full_pipeline.py` is still a placeholder.
-- The etalon calibration is relative, not absolute. The fitted shock spectra live on a relative wavenumber axis.
-- The current state history uses the strongest transition only for CO mole fraction.
-- The current pressure reduction uses the `N2` broadening coefficients and a global `0.84` correction factor.
-- The current fit structure is a pragmatic translation of the MATLAB example, but the optimizer is SciPy `least_squares`, not a custom hand-written gradient descent loop.
-
-## Remaining Analysis TODO
-
-- [ ] Decide whether the etalon polynomial order should stay at the current pipeline default or be changed again.
-- [ ] Review the warm-start Voigt fit on the full sweep stack and decide whether specific scan ranges should be masked out before final reporting.
-- [ ] Tighten the physical constraints in the state-reduction layer if you want pressure broadening and mole-fraction estimates to be less empirical.
-- [ ] Move the active baseline logic out of `src/mock_lab/pipelines/shock_snapshot.py` into `src/mock_lab/pipelines/baseline.py` if you want a cleaner stage separation.
-- [ ] Finalize the report figures and then fold the exact commands and file outputs into `report/README.md` if you want the reporting workflow documented separately.
+- `src/mock_lab/pipelines/baseline.py` is still a placeholder; the active baseline handling currently lives in `src/mock_lab/pipelines/shock_snapshot.py`
+- `src/mock_lab/pipelines/full_pipeline.py` is still a placeholder
+- the etalon calibration is relative rather than absolute
+- the pressure reduction remains empirical because it depends on fitted linewidths and the global `0.84` scaling
+- the mole-fraction reduction currently uses only the strongest transition area
+- the uncertainty bands are local covariance bands, not a full stochastic uncertainty analysis

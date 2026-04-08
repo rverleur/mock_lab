@@ -1,4 +1,13 @@
-"""Voigt-profile modeling and fitting utilities for the CO mock lab."""
+"""Voigt-profile modeling and fitting utilities for the CO mock lab.
+
+The active Python implementation uses:
+
+- ``scipy.special.voigt_profile`` for the actual line-shape evaluation
+- ``scipy.optimize.least_squares`` for nonlinear fitting
+
+The legacy MATLAB McLean approximation is kept only under ``examples/`` as a
+reference from the course material; it is not used by the Python workflow.
+"""
 
 from __future__ import annotations
 
@@ -19,16 +28,24 @@ Array2D = NDArray[np.float64]
 
 T_REF_K = 296.0
 BOLTZMANN_CONSTANT_J_K = 1.380649e-23
+BOLTZMANN_CONSTANT_ERG_K = 1.380649e-16
 AVOGADRO_NUMBER = 6.02214076e23
 LIGHT_SPEED_M_S = 299792458.0
 CO_MOLAR_MASS_KG_MOL = 28.0101e-3
 CO_MOLECULAR_MASS_KG = CO_MOLAR_MASS_KG_MOL / AVOGADRO_NUMBER
 SECOND_RADIATION_CONSTANT_CM_K = 1.438776877
+ATM_PRESSURE_DYN_CM2 = 1.01325e6
 
 
 @dataclass(frozen=True)
 class Transition:
-    """Spectroscopic parameters for one CO transition."""
+    """Spectroscopic parameters for one CO transition.
+
+    `line_strength_ref` is stored in `cm^-2/atm` at `T_REF_K`. The handout
+    provides the line strengths in HITRAN units,
+    `cm^-1 / (molecule cm^-2)`, so the conversion is applied immediately when
+    the transition constants are defined.
+    """
 
     label: str
     center_cm_inv: float
@@ -40,13 +57,41 @@ class Transition:
     n_co: float
 
 
+def hitran_line_strength_to_cm2_atm(
+    line_strength_hitran: float,
+    *,
+    reference_temperature_k: float = T_REF_K,
+) -> float:
+    """Convert a HITRAN line strength to `cm^-2/atm` at a reference temperature.
+
+    The conversion uses the one-atmosphere number-density factor in CGS:
+
+    `S_ref(cm^-2/atm) = S_hitran * P_atm / (k_B * T_ref)`
+
+    with `P_atm = 1.01325e6 dyn/cm^2` and `k_B` in `erg/K`. At `296 K` the
+    multiplier is approximately `2.4794e19`, matching the common hard-coded
+    conversion factor used in the lab notes.
+    """
+
+    if reference_temperature_k <= 0.0:
+        raise ValueError("Reference temperature must be positive.")
+
+    return float(
+        line_strength_hitran
+        * ATM_PRESSURE_DYN_CM2
+        / (BOLTZMANN_CONSTANT_ERG_K * reference_temperature_k)
+    )
+
+
 # These three transitions are the handout-provided spectroscopic constants used
-# throughout the current fitting and state-reduction workflow.
+# throughout the current fitting and state-reduction workflow. The line
+# strengths are converted here into `cm^-2/atm` at `T_REF_K` and kept in that
+# unit convention for the rest of the codebase.
 DEFAULT_CO_TRANSITIONS: tuple[Transition, ...] = (
     Transition(
         label="P(0,31)",
         center_cm_inv=2008.525,
-        line_strength_ref=2.669e-22,
+        line_strength_ref=hitran_line_strength_to_cm2_atm(2.669e-22),
         lower_state_energy_cm_inv=1901.131,
         gamma_n2_cm_inv_atm=0.0412,
         n_n2=0.47,
@@ -56,7 +101,7 @@ DEFAULT_CO_TRANSITIONS: tuple[Transition, ...] = (
     Transition(
         label="P(2,20)",
         center_cm_inv=2008.422,
-        line_strength_ref=1.149e-28,
+        line_strength_ref=hitran_line_strength_to_cm2_atm(1.149e-28),
         lower_state_energy_cm_inv=5051.740,
         gamma_n2_cm_inv_atm=0.0526,
         n_n2=0.57,
@@ -66,7 +111,7 @@ DEFAULT_CO_TRANSITIONS: tuple[Transition, ...] = (
     Transition(
         label="P(3,14)",
         center_cm_inv=2008.552,
-        line_strength_ref=2.877e-32,
+        line_strength_ref=hitran_line_strength_to_cm2_atm(2.877e-32),
         lower_state_energy_cm_inv=6742.874,
         gamma_n2_cm_inv_atm=0.0607,
         n_n2=0.65,
@@ -150,9 +195,21 @@ def line_strength_at_temperature(
     temperature_k: float,
     transition: Transition,
 ) -> float:
-    """Return the temperature-scaled integrated line strength for one transition."""
+    """Return `S(T)` in `cm^-2/atm` for one transition.
+
+    The stored reference strength is already in `cm^-2/atm` at `T_REF_K`, so
+    this applies the standard HITRAN temperature correction in the
+    pressure-normalized convention used by this lab:
+
+    `S(T) = S(T0) * Q(T0)/Q(T) * T0/T * exp[-c2 E'' (1/T - 1/T0)]`
+    `       * (1 - exp[-c2 nu0 / T]) / (1 - exp[-c2 nu0 / T0])`
+    """
+
+    if temperature_k <= 0.0:
+        raise ValueError("Temperature must be positive.")
 
     partition_ratio = co_partition_function_ratio(temperature_k)
+    temperature_ratio = T_REF_K / temperature_k
     stimulated_emission_ratio = (
         1.0
         - np.exp(-SECOND_RADIATION_CONSTANT_CM_K * transition.center_cm_inv / temperature_k)
@@ -168,6 +225,7 @@ def line_strength_at_temperature(
     return float(
         transition.line_strength_ref
         * (1.0 / partition_ratio)
+        * temperature_ratio
         * lower_state_ratio
         * stimulated_emission_ratio
     )
@@ -321,7 +379,10 @@ def evaluate_voigt_spectrum(
     *,
     transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
 ) -> tuple[Array1D, Array2D, Array1D, Array1D]:
-    """Evaluate the sum of Voigt profiles on a frequency axis."""
+    """Evaluate the sum of Voigt profiles on a frequency axis.
+
+    This calls ``scipy.special.voigt_profile`` directly for each transition.
+    """
 
     gaussian_sigma_cm_inv = np.asarray(
         [
@@ -620,6 +681,11 @@ def fit_voigt_spectrum(
     - `P(2,20)` and `P(3,14)` share a collisional half-width
     - all line areas are derived from one strongest-line area and
       temperature-dependent line-strength ratios
+
+    The fit is solved with ``scipy.optimize.least_squares`` against the
+    measured absorbance samples. The returned ``VoigtFitParameters`` object is
+    expanded back into explicit per-line centers, widths, and areas even
+    though the optimizer works on the reduced constrained parameter set.
     """
 
     if anchor_index != 0:
