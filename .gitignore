@@ -32,6 +32,9 @@ results/**
 # Large local media
 assets/videos/*.mov
 
+# Large third party datasets
+third_party/
+
 # LaTeX build artifacts
 report/*.aux
 report/*.bbl
