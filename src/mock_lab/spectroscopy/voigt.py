@@ -20,6 +20,18 @@ from scipy.optimize import least_squares
 from scipy.special import voigt_profile
 from scipy.stats import t as student_t
 
+from mock_lab.spectroscopy.collisional_broadening import (
+    COLLISION_PARTNERS,
+    CollisionPartnerBroadening,
+)
+from mock_lab.spectroscopy.hitemp import (
+    DEFAULT_HITEMP_CO_PAR_PATH,
+    UncertaintyEstimate,
+    par_line_number_from_csv_row,
+    read_hitemp_records_by_csv_row,
+    split_reference_indices,
+    uncertainty_estimates_for_record,
+)
 from mock_lab.spectroscopy.tips import get_co_partition_sum
 
 
@@ -41,20 +53,71 @@ ATM_PRESSURE_DYN_CM2 = 1.01325e6
 class Transition:
     """Spectroscopic parameters for one CO transition.
 
-    `line_strength_ref` is stored in `cm^-2/atm` at `T_REF_K`. The handout
-    provides the line strengths in HITRAN units,
-    `cm^-1 / (molecule cm^-2)`, so the conversion is applied immediately when
-    the transition constants are defined.
+    `line_strength_ref` is stored in `cm^-2/atm` at `T_REF_K`. The local
+    HiTEMP line list stores HITRAN units, `cm^-1 / (molecule cm^-2)`, so the
+    conversion is applied immediately when these transition constants are built.
     """
 
     label: str
+    source_csv_row: int
+    source_par_line: int
+    molecule_id: int
+    isotopologue_id: int
     center_cm_inv: float
+    line_strength_hitran_ref: float
     line_strength_ref: float
+    einstein_a_s_inv: float
     lower_state_energy_cm_inv: float
-    gamma_n2_cm_inv_atm: float
-    n_n2: float
-    gamma_co_cm_inv_atm: float
-    n_co: float
+    air_broadened_hwhm_cm_inv_atm: float
+    self_broadened_hwhm_cm_inv_atm: float
+    temperature_dependence_air: float
+    pressure_shift_air_cm_inv_atm: float
+    upper_global_quanta: str
+    lower_global_quanta: str
+    upper_local_quanta: str
+    lower_local_quanta: str
+    uncertainty_indices: str
+    reference_indices: str
+    reference_index_values: tuple[int, ...]
+    line_mixing_flag: str
+    upper_statistical_weight: float
+    lower_statistical_weight: float
+    uncertainties: dict[str, UncertaintyEstimate]
+    broadening_by_species: dict[str, CollisionPartnerBroadening]
+
+    @property
+    def gamma_n2_cm_inv_atm(self) -> float:
+        """Return the table-based CO-N2 broadening HWHM used for pressure."""
+
+        return self.broadening_by_species["N2"].gamma_ref_cm_inv_atm
+
+    @property
+    def n_n2(self) -> float:
+        """Return the temperature exponent used by the pressure reduction."""
+
+        return self.broadening_by_species["N2"].temperature_exponent
+
+    @property
+    def gamma_co_cm_inv_atm(self) -> float:
+        """Return the table-based CO-CO broadening HWHM."""
+
+        return self.broadening_by_species["CO"].gamma_ref_cm_inv_atm
+
+    @property
+    def n_co(self) -> float:
+        """Return the table-based CO-CO broadening temperature exponent."""
+
+        return self.broadening_by_species["CO"].temperature_exponent
+
+    def broadening_gamma_ref(self, species: str) -> float:
+        """Return the reference HWHM for one collision partner."""
+
+        return self.broadening_by_species[species].gamma_ref_cm_inv_atm
+
+    def broadening_temperature_exponent(self, species: str) -> float:
+        """Return the power-law temperature exponent for one collision partner."""
+
+        return self.broadening_by_species[species].temperature_exponent
 
 
 def hitran_line_strength_to_cm2_atm(
@@ -83,42 +146,122 @@ def hitran_line_strength_to_cm2_atm(
     )
 
 
-# These three transitions are the handout-provided spectroscopic constants used
-# throughout the current fitting and state-reduction workflow. The line
-# strengths are converted here into `cm^-2/atm` at `T_REF_K` and kept in that
-# unit convention for the rest of the codebase.
-DEFAULT_CO_TRANSITIONS: tuple[Transition, ...] = (
-    Transition(
-        label="P(0,31)",
-        center_cm_inv=2008.525,
-        line_strength_ref=hitran_line_strength_to_cm2_atm(2.669e-22),
-        lower_state_energy_cm_inv=1901.131,
-        gamma_n2_cm_inv_atm=0.0412,
-        n_n2=0.47,
-        gamma_co_cm_inv_atm=0.0430,
-        n_co=0.50,
-    ),
-    Transition(
-        label="P(2,20)",
-        center_cm_inv=2008.422,
-        line_strength_ref=hitran_line_strength_to_cm2_atm(1.149e-28),
-        lower_state_energy_cm_inv=5051.740,
-        gamma_n2_cm_inv_atm=0.0526,
-        n_n2=0.57,
-        gamma_co_cm_inv_atm=0.0550,
-        n_co=0.50,
-    ),
-    Transition(
-        label="P(3,14)",
-        center_cm_inv=2008.552,
-        line_strength_ref=hitran_line_strength_to_cm2_atm(2.877e-32),
-        lower_state_energy_cm_inv=6742.874,
-        gamma_n2_cm_inv_atm=0.0607,
-        n_n2=0.65,
-        gamma_co_cm_inv_atm=0.0610,
-        n_co=0.50,
-    ),
+HITEMP_CO_TRANSITION_CSV_ROWS: tuple[tuple[str, int], ...] = (
+    ("P(0,31)", 109056),
+    ("P(2,20)", 109053),
+    ("P(3,14)", 109058),
 )
+
+# Paper-table collision-partner broadening parameters for the three fitted CO
+# transitions. The HiTEMP line list remains the source of truth for line
+# positions and strengths, while this table overrides the pressure-broadening
+# model with species-resolved coefficients and exponents.
+REFERENCE_BROADENING_BY_LABEL: dict[str, dict[str, CollisionPartnerBroadening]] = {
+    "P(2,20)": {
+        "N2": CollisionPartnerBroadening(0.0526, 0.57),
+        "CO": CollisionPartnerBroadening(0.0550, 0.50),
+        "CO2": CollisionPartnerBroadening(0.0521, 0.50),
+        "H2O": CollisionPartnerBroadening(0.1199, 0.72),
+        "OH": CollisionPartnerBroadening(0.0383, 0.57),
+        "H2": CollisionPartnerBroadening(0.0610, 0.47),
+        "O2": CollisionPartnerBroadening(0.0473, 0.56),
+        "O": CollisionPartnerBroadening(0.0391, 0.57),
+        "H": CollisionPartnerBroadening(0.1001, 0.57),
+    },
+    "P(0,31)": {
+        "N2": CollisionPartnerBroadening(0.0412, 0.47),
+        "CO": CollisionPartnerBroadening(0.0430, 0.50),
+        "CO2": CollisionPartnerBroadening(0.0405, 0.47),
+        "H2O": CollisionPartnerBroadening(0.0957, 0.61),
+        "OH": CollisionPartnerBroadening(0.0300, 0.47),
+        "H2": CollisionPartnerBroadening(0.0477, 0.39),
+        "O2": CollisionPartnerBroadening(0.0435, 0.56),
+        "O": CollisionPartnerBroadening(0.0306, 0.47),
+        "H": CollisionPartnerBroadening(0.0784, 0.47),
+    },
+    "P(3,14)": {
+        "N2": CollisionPartnerBroadening(0.0607, 0.65),
+        "CO": CollisionPartnerBroadening(0.0610, 0.50),
+        "CO2": CollisionPartnerBroadening(0.0636, 0.53),
+        "H2O": CollisionPartnerBroadening(0.1268, 0.77),
+        "OH": CollisionPartnerBroadening(0.0442, 0.65),
+        "H2": CollisionPartnerBroadening(0.0703, 0.53),
+        "O2": CollisionPartnerBroadening(0.0500, 0.59),
+        "O": CollisionPartnerBroadening(0.0451, 0.65),
+        "H": CollisionPartnerBroadening(0.1155, 0.65),
+    },
+}
+
+
+def transition_from_hitemp_record(
+    label: str,
+    csv_row_number: int,
+    record: dict[str, object],
+) -> Transition:
+    """Build one `Transition` from a selected HiTEMP `.par` record."""
+
+    line_strength_hitran = float(record["line_strength_hitran"])
+    line_strength_ref = hitran_line_strength_to_cm2_atm(line_strength_hitran)
+    uncertainties = uncertainty_estimates_for_record(
+        record,
+        line_strength_value=line_strength_ref,
+    )
+
+    return Transition(
+        label=label,
+        source_csv_row=csv_row_number,
+        source_par_line=par_line_number_from_csv_row(csv_row_number),
+        molecule_id=int(record["molecule_id"]),
+        isotopologue_id=int(record["isotopologue_id"]),
+        center_cm_inv=float(record["wavenumber_cm_inv"]),
+        line_strength_hitran_ref=line_strength_hitran,
+        line_strength_ref=line_strength_ref,
+        einstein_a_s_inv=float(record["einstein_a_s_inv"]),
+        lower_state_energy_cm_inv=float(record["lower_state_energy_cm_inv"]),
+        air_broadened_hwhm_cm_inv_atm=float(record["air_broadened_hwhm_cm_inv_atm"]),
+        self_broadened_hwhm_cm_inv_atm=float(record["self_broadened_hwhm_cm_inv_atm"]),
+        temperature_dependence_air=float(record["temperature_dependence_air"]),
+        pressure_shift_air_cm_inv_atm=float(record["pressure_shift_air_cm_inv_atm"]),
+        upper_global_quanta=str(record["upper_global_quanta"]),
+        lower_global_quanta=str(record["lower_global_quanta"]),
+        upper_local_quanta=str(record["upper_local_quanta"]),
+        lower_local_quanta=str(record["lower_local_quanta"]),
+        uncertainty_indices=str(record["uncertainty_indices"]),
+        reference_indices=str(record["reference_indices"]),
+        reference_index_values=split_reference_indices(str(record["reference_indices"])),
+        line_mixing_flag=str(record["line_mixing_flag"]),
+        upper_statistical_weight=float(record["upper_statistical_weight"]),
+        lower_statistical_weight=float(record["lower_statistical_weight"]),
+        uncertainties=uncertainties,
+        broadening_by_species={
+            species: REFERENCE_BROADENING_BY_LABEL[label][species]
+            for species in COLLISION_PARTNERS
+        },
+    )
+
+
+def load_default_co_transitions() -> tuple[Transition, ...]:
+    """Load the three mock-lab CO transitions from the local HiTEMP line list."""
+
+    records_by_csv_row = read_hitemp_records_by_csv_row(
+        {csv_row for _, csv_row in HITEMP_CO_TRANSITION_CSV_ROWS},
+        par_path=DEFAULT_HITEMP_CO_PAR_PATH,
+    )
+    return tuple(
+        transition_from_hitemp_record(
+            label,
+            csv_row,
+            records_by_csv_row[csv_row],
+        )
+        for label, csv_row in HITEMP_CO_TRANSITION_CSV_ROWS
+    )
+
+
+# These three transitions are sourced from the local HiTEMP 2019 CO line list
+# and are the single source of truth for the current fitting and state-reduction
+# workflow. The line strengths are converted here into `cm^-2/atm` at `T_REF_K`
+# and kept in that unit convention for the rest of the codebase.
+DEFAULT_CO_TRANSITIONS: tuple[Transition, ...] = load_default_co_transitions()
 
 
 @dataclass(frozen=True)

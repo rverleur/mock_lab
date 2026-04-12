@@ -269,7 +269,7 @@ def plot_voigt_fit(
 
 
 def plot_state_history(
-    scan_index: Array1D,
+    x_values: Array1D,
     temperature_k: Array1D,
     pressure_atm: Array1D,
     co_mole_fraction: Array1D,
@@ -281,6 +281,7 @@ def plot_state_history(
     co_mole_fraction_lower: Array1D | None = None,
     co_mole_fraction_upper: Array1D | None = None,
     uncertainty_label: str = "95% CI",
+    xlabel: str = r"Time [$\mu$s]",
 ) -> Figure:
     """Plot scan-by-scan temperature, pressure, and CO mole fraction."""
 
@@ -296,7 +297,7 @@ def plot_state_history(
 
     if temperature_lower is not None and temperature_upper is not None:
         ax_temperature.fill_between(
-            scan_index,
+            x_values,
             temperature_lower,
             temperature_upper,
             color="tab:red",
@@ -304,34 +305,34 @@ def plot_state_history(
             linewidth=0.0,
             label=uncertainty_label,
         )
-    ax_temperature.plot(scan_index, temperature_k, color="tab:red", linewidth=1.4)
+    ax_temperature.plot(x_values, temperature_k, color="tab:red", linewidth=1.4)
     ax_temperature.set_ylabel("Temperature [K]")
     if temperature_lower is not None and temperature_upper is not None:
         ax_temperature.legend(frameon=False, loc="best")
 
     if pressure_lower is not None and pressure_upper is not None:
         ax_pressure.fill_between(
-            scan_index,
+            x_values,
             pressure_lower,
             pressure_upper,
             color="tab:blue",
             alpha=0.18,
             linewidth=0.0,
         )
-    ax_pressure.plot(scan_index, pressure_atm, color="tab:blue", linewidth=1.4)
+    ax_pressure.plot(x_values, pressure_atm, color="tab:blue", linewidth=1.4)
     ax_pressure.set_ylabel("Pressure [atm]")
 
     if co_mole_fraction_lower is not None and co_mole_fraction_upper is not None:
         ax_mole_fraction.fill_between(
-            scan_index,
+            x_values,
             co_mole_fraction_lower,
             co_mole_fraction_upper,
             color="tab:green",
             alpha=0.18,
             linewidth=0.0,
         )
-    ax_mole_fraction.plot(scan_index, co_mole_fraction, color="tab:green", linewidth=1.4)
+    ax_mole_fraction.plot(x_values, co_mole_fraction, color="tab:green", linewidth=1.4)
     ax_mole_fraction.set_ylabel("CO Mole Fraction [-]")
-    ax_mole_fraction.set_xlabel("Scan Index [-]")
+    ax_mole_fraction.set_xlabel(xlabel)
 
     return fig

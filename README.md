@@ -106,21 +106,41 @@ The legacy MATLAB McLean approximation is kept only in `examples/matlab_voigt_de
 
 ### Transitions Used
 
-The three handout transitions are hard-coded in `DEFAULT_CO_TRANSITIONS` inside `src/mock_lab/spectroscopy/voigt.py`:
+The three fitted CO transitions are still exposed as `DEFAULT_CO_TRANSITIONS`
+inside `src/mock_lab/spectroscopy/voigt.py`, but the numerical values are now
+loaded from the local HiTEMP line list instead of the rounded lab-handout
+table.
 
-- `P(0,31)`
-- `P(2,20)`
-- `P(3,14)`
+The source file is:
+
+- `third_party/HiTEMP/05_HITEMP2019.par`
+
+The selected source rows are the generated CSV row numbers from
+`third_party/HiTEMP/05_HITEMP2019.csv`:
+
+- `P(0,31)`: row `109056`
+- `P(2,20)`: row `109053`
+- `P(3,14)`: row `109058`
+
+Those rows are encoded in `HITEMP_CO_TRANSITION_CSV_ROWS` in
+`src/mock_lab/spectroscopy/voigt.py`. Because the CSV has a header and the
+`.par` file does not, the underlying `.par` line number is one less than the
+CSV row number.
 
 Each transition stores:
 
 - `center_cm_inv`
+- `line_strength_hitran_ref`
 - `line_strength_ref`
+- `einstein_a_s_inv`
 - `lower_state_energy_cm_inv`
-- `gamma_n2_cm_inv_atm`
-- `n_n2`
-- `gamma_co_cm_inv_atm`
-- `n_co`
+- `air_broadened_hwhm_cm_inv_atm`
+- `self_broadened_hwhm_cm_inv_atm`
+- `temperature_dependence_air`
+- `pressure_shift_air_cm_inv_atm`
+- quantum-label fields
+- uncertainty and reference-index fields
+- `broadening_by_species`
 
 `line_strength_ref` is not kept in raw HITRAN units. The conversion to
 `cm^-2/atm` is applied immediately in
@@ -135,7 +155,32 @@ same as multiplying by approximately `2.4794e19`.
 So from the point where `DEFAULT_CO_TRANSITIONS` is defined onward, the code
 stores and uses reference line strengths in `cm^-2/atm`.
 
-These values drive both the fit model and the later state-reduction formulas.
+Pressure broadening no longer comes from HiTEMP air-broadening fields. The
+pressure model now uses the species-resolved table values from the reference
+paper for:
+
+- `N2`
+- `CO`
+- `CO2`
+- `H2O`
+- `OH`
+- `H2`
+- `O2`
+- `O`
+- `H`
+
+Those table values are attached to each transition under
+`transition.broadening_by_species` in `src/mock_lab/spectroscopy/voigt.py`,
+using the `CollisionPartnerBroadening` dataclass from
+`src/mock_lab/spectroscopy/collisional_broadening.py`.
+
+So the active transition objects now combine:
+
+- HiTEMP line-center / line-strength metadata
+- paper-table species-resolved broadening coefficients and exponents
+
+That combined transition definition drives both the fit model and the later
+state-reduction formulas.
 
 ### Model Form
 
@@ -190,7 +235,7 @@ So the code uses the spectroscopy to tie the three areas together:
 - the optimizer fits only the strongest-line area
 - the other two line areas are derived from that strongest-line area and the temperature-dependent line-strength ratios
 
-So the one fitted area should be read as the overall integrated absorbance scale of the CO spectrum for that sweep. It is not itself temperature, pressure, or mole fraction. It becomes useful for the final reported state only after the code combines it with the fitted temperature, corrected pressure, the `cm^-2/atm` line-strength model, and the optical path length.
+So the one fitted area should be read as the overall integrated absorbance scale of the CO spectrum for that sweep. It is not itself temperature, pressure, or mole fraction. It becomes useful for the final reported state only after the code combines it with the fitted temperature, the mixture-weighted pressure estimate, the `cm^-2/atm` line-strength model, and the optical path length.
 
 ### Which Free Parameters Drive Which Final Quantities
 
@@ -206,7 +251,8 @@ The main fit quantities do not all feed the final reported state variables in th
 
 `collisional_hwhm_cm_inv`
 
-- is converted to per-line apparent pressure in `apparent_pressure_atm()`
+- is converted to pressure through the mixture-weighted broadening law in
+  `src/mock_lab/spectroscopy/state_estimation.py`
 - is the main driver of the reported pressure
 - only affects mole fraction indirectly through the pressure estimate
 
@@ -258,21 +304,24 @@ That is why the fit behaves as a sequential time-history reduction rather than a
 
 The state-reduction code is implemented in:
 
+- `src/mock_lab/spectroscopy/collisional_broadening.py`
 - `src/mock_lab/spectroscopy/state_estimation.py`
 - `src/mock_lab/pipelines/time_history.py`
 
 The current reported quantities are built as follows:
 
 - temperature is taken directly from the fitted shared temperature
-- apparent pressure is computed from the fitted collisional widths using the tabulated `gamma_n2` and `n_n2` values
-- the three apparent pressures are averaged
-- the mean apparent pressure is scaled by `1 / 0.84` to form the reported pressure
-- CO mole fraction is estimated from the strongest fitted line area only
+- the fitted linewidths are combined with a two-partner collisional-broadening model rather than an air-based surrogate
+- the pressure model uses the paper-table `gamma_ref` and `n` values for CO self-broadening and an N2-equivalent bath gas
+- the only composition quantity solved explicitly in the pressure model is `X_CO`
+- every non-CO collision partner is treated as part of the same effective bath gas, following the simplification allowed in the handout
+- per-line pressures are computed from the fitted collisional widths and then averaged
+- CO mole fraction is estimated from the strongest fitted line area only, but it is solved self-consistently with pressure because the pressure model itself depends on the CO mole fraction
 
 The strongest-line area is converted to mole fraction using:
 
 - the fitted temperature
-- the corrected pressure
+- the self-consistent pressure from the mixture broadening model
 - the optical path length
 - the temperature-dependent line strength `S(T)`
 
@@ -295,6 +344,32 @@ So the reported mole fraction is computed in
 
 The current optical path length is fixed in `src/mock_lab/spectroscopy/state_estimation.py` as `DEFAULT_OPTICAL_PATH_LENGTH_CM = 10.32`.
 
+### Pressure Model
+
+The active pressure solve in `src/mock_lab/spectroscopy/state_estimation.py`
+iterates only on `X_CO`. For each sweep it uses:
+
+- `src/mock_lab/spectroscopy/collisional_broadening.py`
+
+and forms one effective broadening coefficient for each transition:
+
+- `gamma_eff(T, X_CO) = X_CO * gamma_CO(T) + (1 - X_CO) * gamma_bath(T)`
+
+where `gamma_bath` is the N2-equivalent bath-gas broadening coefficient. The
+pressure estimate is then obtained from the fitted collisional widths and the
+effective broadening coefficients. This is simpler than the earlier
+species-by-species mixture model and is the current recommended path because it
+matches the handout guidance more closely and removes the least defensible
+composition assumption from the repo.
+
+This does still leave one explicit modeling assumption:
+
+- all non-CO collision partners are treated as spectroscopically equivalent to
+  N2 for the pressure reduction
+
+That is reasonable as a handout-level simplification, but it is not a
+species-resolved reacting-mixture model.
+
 ## TIPS And Spectroscopy Support
 
 The local partition sums are accessed through:
@@ -306,7 +381,7 @@ which reads the vendored HITRAN TIPS resources from:
 - `third_party/hitran_tips/`
 
 The line-strength model used in the fit and in the mole-fraction calculation is
-therefore consistent with the same local TIPS data and the same handout
+therefore consistent with the same local TIPS data and the same HiTEMP
 transition metadata. The temperature scaling applied in
 `line_strength_at_temperature()` is
 
@@ -318,20 +393,142 @@ of the reduction.
 
 ## Uncertainty Summary
 
-The current uncertainty treatment is a local covariance approach based on the fitted Jacobian.
+There are two uncertainty sources now represented in the code.
+
+The first is spectroscopic metadata uncertainty from HiTEMP. In
+`src/mock_lab/spectroscopy/hitemp.py`, the six-character `uncertainty_indices`
+field is decoded for:
+
+- line position
+- line strength
+- HiTEMP broadening-related metadata retained on the raw record
+- air pressure-induced line shift
+
+Following the HiTEMP/HITRAN convention, line position and pressure shift use
+absolute uncertainty ranges in `cm^-1`; line strength and broadening-related
+parameters use relative uncertainty ranges. These decoded upper-bound estimates
+are stored on each `Transition` under `transition.uncertainties`. The lower-state
+energy is retained from HiTEMP, but this `.par` uncertainty field does not
+provide a separate lower-state-energy uncertainty.
+
+The selected transition metadata and decoded uncertainties can be exported with:
+
+- `scripts/extract_mock_lab_hitemp_transitions.py`
+
+The second uncertainty source is the local fit covariance based on the fitted
+Jacobian.
 
 In `src/mock_lab/spectroscopy/voigt.py`:
 
 - the `least_squares` Jacobian is used to estimate a reduced-parameter covariance matrix
 - that covariance is propagated to the expanded fit quantities with a local linearization
-- approximate two-sided 95% confidence intervals are exported for temperature, line centers, collisional widths, line areas, and mean apparent pressure
+- approximate two-sided 95% confidence intervals are exported for temperature, line centers, collisional widths, line areas, and the legacy N2-equivalent apparent-pressure diagnostic
 
 In `src/mock_lab/pipelines/time_history.py`:
 
-- the saved fit covariance is propagated into the reported temperature, corrected pressure, and CO mole fraction
+- the saved fit covariance is propagated into the reported temperature, pressure, and CO mole fraction
+- the pressure and mole-fraction bands include a second deterministic layer on top of the fit covariance
+- that deterministic layer currently includes:
+  5% on CO self-broadening `gamma_ref` and `n`
+  5% on the N2-equivalent bath-gas `gamma_ref` and `n`
+  a line-consistency term based on how strongly the line-by-line pressure estimates disagree for the fitted sweep
+- the fit and model contributions are combined in quadrature for the plotted
+  pressure and CO-mole-fraction bands
 - the state-history figure is drawn with shaded 95% confidence bands
 
-This is a reasonable first uncertainty estimate, but it is still a local linearized approximation. It is not a bootstrap, Monte Carlo, or full Bayesian posterior.
+That line-consistency term matters. Without it, the early-time pressure
+uncertainty can be much too small because the local fit covariance alone does
+not fully reflect how badly the individual transition pressures disagree when
+the spectrum is weak or poorly constrained.
+
+## Spectroscopic Monte Carlo Summary
+
+The spectroscopy uncertainty Monte Carlo is implemented in:
+
+- `src/mock_lab/pipelines/monte_carlo_state_history.py`
+
+The wrapper scripts are:
+
+- `scripts/run_state_history_monte_carlo.py`
+- `scripts/plot_state_history_monte_carlo.py`
+
+These wrappers are written for IDE use. The user-facing settings live in the
+`if __name__ == "__main__":` block at the bottom of each script, so the normal
+workflow is to edit those variables and run the file directly from the IDE.
+
+This Monte Carlo stage is a resumable full-refit calculation. It reads:
+
+- `data/processed/exports/voigt_fit_results.npz`
+- `results/tables/state_history.npz`
+
+and jitters the HiTEMP spectroscopic parameters inside the upper bound of their
+uncertainty-code ranges. The sampling assumption is uniform within each bound.
+
+The current jittered parameters are:
+
+- line position
+- reference line strength
+- CO self-broadening `gamma_ref`
+- CO self-broadening `n`
+- N2-equivalent bath-gas `gamma_ref`
+- N2-equivalent bath-gas `n`
+
+Each Monte Carlo trial samples a complete transition set and then reruns the
+full constrained Voigt fit sweep-by-sweep with that sampled spectroscopy. So
+the saved Monte Carlo distribution now includes both:
+
+- the effect of spectroscopic jitter on the fitted line model
+- the effect of that changed fit on the derived `T`, `P`, and `X_CO`
+
+Only the line positions and line strengths alter the spectral fit itself. The
+broadening coefficients and exponents alter the post-fit pressure /
+mole-fraction reduction for each trial. The Monte Carlo summary then combines:
+
+- trial-to-trial spread from the full refit with jittered spectroscopy
+- per-trial local fit covariance
+- per-trial line-consistency uncertainty
+
+The independent uncertainty sources are combined in the saved summary as:
+
+- full-refit Monte Carlo uncertainty from the trial distribution
+- fit-plus-line-consistency uncertainty from the per-trial local bands
+- total uncertainty from root-sum-square combination of those two half-widths
+
+The run is checkpointed to:
+
+- `results/monte_carlo/state_history_refit_trial_states.npy`
+- `results/monte_carlo/state_history_refit_trial_fit_half_widths.npy`
+- `results/monte_carlo/state_history_refit_trial_success.npy`
+- `results/monte_carlo/state_history_refit_sampled_transitions.npy`
+- `results/monte_carlo/state_history_refit_mc_metadata.json`
+
+The summary outputs are:
+
+- `results/monte_carlo/state_history_monte_carlo_summary.npz`
+- `results/monte_carlo/state_history_monte_carlo_summary.csv`
+- `results/figures/state_history_monte_carlo.png`
+
+For a small smoke test, edit the bottom block of
+`scripts/run_state_history_monte_carlo.py` to use values such as:
+
+- `trial_count = 10`
+- `chunk_size = 5`
+- `output_dir = REPO_ROOT / "results" / "monte_carlo" / "bath_gas_smoke_10"`
+- `force_restart = True`
+
+For a full resumable run, edit the same block to something like:
+
+- `trial_count = 10000`
+- `chunk_size = 250`
+- `workers = 4`
+- `force_restart = False`
+
+If the current execution environment blocks Python process pools, the script
+warns and falls back to the single-process chunk path.
+
+To rebuild only the figure from saved data, edit the `summary_data` and
+`figure_output_dir` variables at the bottom of
+`scripts/plot_state_history_monte_carlo.py` and run that file directly.
 
 ## Main Generated Outputs
 
@@ -341,6 +538,10 @@ The current workflow writes the main intermediate and report products to:
 - `data/interim/baseline/baseline_average.npz`
 - `data/processed/exports/shock_frequency_domain.npz`
 - `data/processed/exports/voigt_fit_results.npz`
+- `third_party/HiTEMP/05_HITEMP2019.csv`
+- `third_party/HiTEMP/mock_lab_co_transitions.csv`
+- `results/monte_carlo/state_history_monte_carlo_summary.npz`
+- `results/monte_carlo/state_history_monte_carlo_summary.csv`
 - `results/figures/etalon_sweep.png`
 - `results/figures/etalon_calibration.png`
 - `results/figures/baseline_shock_overlay.png`
@@ -348,6 +549,7 @@ The current workflow writes the main intermediate and report products to:
 - `results/figures/shock_absorbance_frequency.png`
 - `results/figures/shock_voigt_fit.png`
 - `results/figures/state_history.png`
+- `results/figures/state_history_monte_carlo.png`
 - `results/tables/voigt_fit_summary.csv`
 - `results/tables/state_history.csv`
 - `results/tables/state_history.npz`
@@ -360,12 +562,15 @@ If one part of the workflow needs to change, these are the primary files to touc
 - `src/mock_lab/io/matlab_loader.py`: MAT loading, timing reconstruction, sweep cutting
 - `src/mock_lab/spectroscopy/etalon_calibration.py`: etalon peak finding and polynomial calibration
 - `src/mock_lab/spectroscopy/absorbance.py`: baseline wing correction, scaling, absorbance windowing
+- `src/mock_lab/spectroscopy/collisional_broadening.py`: species-specific broadening data and the active N2-equivalent bath-gas helpers
+- `src/mock_lab/spectroscopy/hitemp.py`: HiTEMP `.par` parsing and uncertainty-code decoding
 - `src/mock_lab/spectroscopy/voigt.py`: spectral model, fit parameterization, uncertainty on fit quantities
 - `src/mock_lab/spectroscopy/state_estimation.py`: pressure and mole-fraction reduction
 - `src/mock_lab/spectroscopy/tips.py`: local partition-sum access
 - `src/mock_lab/pipelines/shock_snapshot.py`: end-to-end baseline/shock preprocessing
 - `src/mock_lab/pipelines/voigt_fit.py`: batch fitting, fit-result export, fit summary table
 - `src/mock_lab/pipelines/time_history.py`: propagated uncertainty on `T`, `P`, and `X_CO`
+- `src/mock_lab/pipelines/monte_carlo_state_history.py`: full-refit spectroscopy Monte Carlo and RSS-combined uncertainty bands
 - `src/mock_lab/plotting/figures.py`: all report-style plotting
 
 ## Wrapper Scripts
@@ -376,6 +581,10 @@ The main entry points are:
 - `scripts/run_voigt_fit.py`
 - `scripts/run_time_history.py`
 - `scripts/run_voigt_fit_video.py`
+- `scripts/extract_hitemp_par_to_csv.py`
+- `scripts/extract_mock_lab_hitemp_transitions.py`
+- `scripts/run_state_history_monte_carlo.py`
+- `scripts/plot_state_history_monte_carlo.py`
 
 They are thin wrappers around the underlying package code and are the easiest place to change dataset paths, output locations, or which representative sweep is shown in the figures.
 
@@ -384,6 +593,20 @@ They are thin wrappers around the underlying package code and are the easiest pl
 - `src/mock_lab/pipelines/baseline.py` is still a placeholder; the active baseline handling currently lives in `src/mock_lab/pipelines/shock_snapshot.py`
 - `src/mock_lab/pipelines/full_pipeline.py` is still a placeholder
 - the etalon calibration is relative rather than absolute
-- the pressure reduction remains empirical because it depends on fitted linewidths and the global `0.84` scaling
+- the pressure reduction assumes all non-CO collision partners may be treated as one N2-equivalent bath gas; this is handout-supported but not a fully reacting-mixture broadening model
 - the mole-fraction reduction currently uses only the strongest transition area
-- the uncertainty bands are local covariance bands, not a full stochastic uncertainty analysis
+- the deterministic uncertainty bands are not purely covariance-based anymore, but they still do not include every possible model-form error
+- the full-refit Monte Carlo is computationally expensive because every trial reruns the Voigt fit across the full sweep stack
+
+## Physically Important Assumptions
+
+These are the assumptions that still matter most for the reported results:
+
+- the pressure reduction treats every non-CO collision partner as an N2-equivalent bath gas
+- `P(3,14)` is kept at a fixed offset from `P(0,31)`
+- `P(2,20)` and `P(3,14)` share one fitted collisional width
+- only one integrated line area is fitted freely; the weaker-line areas are tied to the strongest line by the temperature-dependent strength ratios
+- the CO mole fraction is reduced from the strongest line area only
+- the optical path length is fixed at `10.32 cm`
+- the frequency calibration is relative, not absolute
+- the early-time pressure band is strongly influenced by the line-consistency term because the fitted lines often disagree there

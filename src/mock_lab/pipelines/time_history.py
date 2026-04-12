@@ -10,12 +10,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 
-from mock_lab.io.matlab_loader import DEFAULT_REFERENCE_FREQUENCY_HZ
+from mock_lab.io.matlab_loader import DEFAULT_PHASE_START_S, DEFAULT_REFERENCE_FREQUENCY_HZ
 from mock_lab.plotting.figures import plot_state_history, save_figure
+from mock_lab.spectroscopy.collisional_broadening import DEFAULT_MIXTURE_COMPOSITION_MODEL
 from mock_lab.spectroscopy.state_estimation import (
     DEFAULT_OPTICAL_PATH_LENGTH_CM,
     StateHistory,
     build_state_history,
+    estimate_broadening_model_uncertainty,
     evaluate_state_from_fit_parameters,
 )
 from mock_lab.spectroscopy.voigt import (
@@ -97,6 +99,8 @@ def _state_confidence_intervals(
     reduced_parameter_covariance: NDArray[np.float64],
     success: NDArray[np.bool_],
     state_history: StateHistory,
+    collisional_hwhm_cm_inv: NDArray[np.float64],
+    strongest_line_area_cm_inv: NDArray[np.float64],
     *,
     confidence_scale: float,
     optical_path_length_cm: float,
@@ -147,7 +151,36 @@ def _state_confidence_intervals(
         state_standard_error = np.sqrt(
             np.clip(np.diag(np.asarray(state_covariance, dtype=float)), a_min=0.0, a_max=None)
         )
-        half_width = confidence_scale * state_standard_error
+        fit_half_width = confidence_scale * state_standard_error
+        parameters = expand_constrained_parameters(
+            reduced_vector,
+            transitions=DEFAULT_CO_TRANSITIONS,
+        )
+        parameters = parameters.__class__(
+            temperature_k=parameters.temperature_k,
+            line_centers_relative_cm_inv=parameters.line_centers_relative_cm_inv,
+            collisional_hwhm_cm_inv=np.asarray(collisional_hwhm_cm_inv[scan_index], dtype=float),
+            line_areas=np.asarray(
+                [
+                    strongest_line_area_cm_inv[scan_index],
+                    *parameters.line_areas[1:],
+                ],
+                dtype=float,
+            ),
+            baseline_offset=parameters.baseline_offset,
+            baseline_slope=parameters.baseline_slope,
+        )
+        model_half_width = estimate_broadening_model_uncertainty(
+            parameters,
+            optical_path_length_cm=optical_path_length_cm,
+            transitions=DEFAULT_CO_TRANSITIONS,
+            transition=DEFAULT_CO_TRANSITIONS[0],
+            composition_model=DEFAULT_MIXTURE_COMPOSITION_MODEL,
+        )
+        half_width = np.sqrt(
+            np.clip(fit_half_width, a_min=0.0, a_max=None) ** 2
+            + np.clip(model_half_width, a_min=0.0, a_max=None) ** 2
+        )
         nominal_state = np.array(
             [
                 state_history.temperature_k[scan_index],
@@ -191,7 +224,7 @@ def run_time_history_pipeline(
 
     with np.load(voigt_fit_data) as data:
         temperature_k = np.asarray(data["temperature_k"], dtype=float)
-        mean_apparent_pressure_atm = np.asarray(data["mean_apparent_pressure_atm"], dtype=float)
+        collisional_hwhm_cm_inv = np.asarray(data["collisional_hwhm_cm_inv"], dtype=float)
         strongest_line_area_cm_inv = np.asarray(data["line_areas"][:, 0], dtype=float)
         success = np.asarray(data["success"], dtype=bool)
         reduced_parameter_vectors = np.asarray(data["reduced_parameter_vectors"], dtype=float)
@@ -201,7 +234,7 @@ def run_time_history_pipeline(
 
     state_history = build_state_history(
         temperature_k,
-        mean_apparent_pressure_atm,
+        collisional_hwhm_cm_inv,
         strongest_line_area_cm_inv,
         sweep_frequency_hz=DEFAULT_REFERENCE_FREQUENCY_HZ,
         optical_path_length_cm=optical_path_length_cm,
@@ -218,6 +251,8 @@ def run_time_history_pipeline(
         reduced_parameter_covariance,
         success,
         state_history,
+        collisional_hwhm_cm_inv,
+        strongest_line_area_cm_inv,
         confidence_scale=confidence_scale,
         optical_path_length_cm=optical_path_length_cm,
     )
@@ -250,7 +285,7 @@ def run_time_history_pipeline(
     )
 
     figure = plot_state_history(
-        state_history.scan_index,
+        1.0e6 * (state_history.scan_time_s + DEFAULT_PHASE_START_S),
         state_history.temperature_k,
         state_history.pressure_atm,
         state_history.co_mole_fraction,
@@ -261,6 +296,7 @@ def run_time_history_pipeline(
         co_mole_fraction_lower=co_mole_fraction_ci95_lower,
         co_mole_fraction_upper=co_mole_fraction_ci95_upper,
         uncertainty_label=f"{int(round(100.0 * confidence_level))}% CI",
+        xlabel=r"Time [$\mu$s]",
     )
     save_figure(figure, figure_output_dir / "state_history.png")
     plt.close(figure)
