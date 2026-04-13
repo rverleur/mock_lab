@@ -12,12 +12,10 @@ from numpy.typing import NDArray
 
 from mock_lab.io.matlab_loader import DEFAULT_PHASE_START_S, DEFAULT_REFERENCE_FREQUENCY_HZ
 from mock_lab.plotting.figures import plot_state_history, save_figure
-from mock_lab.spectroscopy.collisional_broadening import DEFAULT_MIXTURE_COMPOSITION_MODEL
 from mock_lab.spectroscopy.state_estimation import (
     DEFAULT_OPTICAL_PATH_LENGTH_CM,
     StateHistory,
     build_state_history,
-    estimate_broadening_model_uncertainty,
     evaluate_state_from_fit_parameters,
 )
 from mock_lab.spectroscopy.voigt import (
@@ -152,34 +150,9 @@ def _state_confidence_intervals(
             np.clip(np.diag(np.asarray(state_covariance, dtype=float)), a_min=0.0, a_max=None)
         )
         fit_half_width = confidence_scale * state_standard_error
-        parameters = expand_constrained_parameters(
-            reduced_vector,
-            transitions=DEFAULT_CO_TRANSITIONS,
-        )
-        parameters = parameters.__class__(
-            temperature_k=parameters.temperature_k,
-            line_centers_relative_cm_inv=parameters.line_centers_relative_cm_inv,
-            collisional_hwhm_cm_inv=np.asarray(collisional_hwhm_cm_inv[scan_index], dtype=float),
-            line_areas=np.asarray(
-                [
-                    strongest_line_area_cm_inv[scan_index],
-                    *parameters.line_areas[1:],
-                ],
-                dtype=float,
-            ),
-            baseline_offset=parameters.baseline_offset,
-            baseline_slope=parameters.baseline_slope,
-        )
-        model_half_width = estimate_broadening_model_uncertainty(
-            parameters,
-            optical_path_length_cm=optical_path_length_cm,
-            transitions=DEFAULT_CO_TRANSITIONS,
-            transition=DEFAULT_CO_TRANSITIONS[0],
-            composition_model=DEFAULT_MIXTURE_COMPOSITION_MODEL,
-        )
-        half_width = np.sqrt(
-            np.clip(fit_half_width, a_min=0.0, a_max=None) ** 2
-            + np.clip(model_half_width, a_min=0.0, a_max=None) ** 2
+        half_width = np.asarray(
+            np.clip(fit_half_width, a_min=0.0, a_max=None),
+            dtype=float,
         )
         nominal_state = np.array(
             [
@@ -297,6 +270,9 @@ def run_time_history_pipeline(
         co_mole_fraction_upper=co_mole_fraction_ci95_upper,
         uncertainty_label=f"{int(round(100.0 * confidence_level))}% CI",
         xlabel=r"Time [$\mu$s]",
+        temperature_ylim=(1000.0, 5000.0),
+        pressure_ylim=(-0.5, 4.5),
+        co_mole_fraction_percent_ylim=(0.0, 6.5),
     )
     save_figure(figure, figure_output_dir / "state_history.png")
     plt.close(figure)

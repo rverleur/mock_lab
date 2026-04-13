@@ -282,6 +282,11 @@ def plot_state_history(
     co_mole_fraction_upper: Array1D | None = None,
     uncertainty_label: str = "95% CI",
     xlabel: str = r"Time [$\mu$s]",
+    y_limit_coverage: float | None = None,
+    y_limit_padding_fraction: float = 0.05,
+    temperature_ylim: tuple[float, float] | None = None,
+    pressure_ylim: tuple[float, float] | None = None,
+    co_mole_fraction_percent_ylim: tuple[float, float] | None = None,
 ) -> Figure:
     """Plot scan-by-scan temperature, pressure, and CO mole fraction."""
 
@@ -325,14 +330,84 @@ def plot_state_history(
     if co_mole_fraction_lower is not None and co_mole_fraction_upper is not None:
         ax_mole_fraction.fill_between(
             x_values,
-            co_mole_fraction_lower,
-            co_mole_fraction_upper,
+            100.0 * co_mole_fraction_lower,
+            100.0 * co_mole_fraction_upper,
             color="tab:green",
             alpha=0.18,
             linewidth=0.0,
         )
-    ax_mole_fraction.plot(x_values, co_mole_fraction, color="tab:green", linewidth=1.4)
-    ax_mole_fraction.set_ylabel("CO Mole Fraction [-]")
+    ax_mole_fraction.plot(
+        x_values,
+        100.0 * co_mole_fraction,
+        color="tab:green",
+        linewidth=1.4,
+    )
+    ax_mole_fraction.set_ylabel("CO Mole Fraction [%]")
     ax_mole_fraction.set_xlabel(xlabel)
+
+    if y_limit_coverage is not None:
+        if not (0.0 < y_limit_coverage <= 1.0):
+            raise ValueError("y_limit_coverage must lie in (0, 1].")
+
+        def apply_percentile_limits(
+            axis: plt.Axes,
+            *series: Array1D | None,
+        ) -> None:
+            """Set percentile-based y limits from the finite plotted values."""
+
+            finite_values = [
+                np.asarray(values, dtype=float)[np.isfinite(np.asarray(values, dtype=float))]
+                for values in series
+                if values is not None
+            ]
+            finite_values = [values for values in finite_values if values.size > 0]
+
+            if not finite_values:
+                return
+
+            combined = np.concatenate(finite_values)
+            lower_tail = 50.0 * (1.0 - y_limit_coverage)
+            upper_tail = 100.0 - lower_tail
+            lower_value = float(np.nanpercentile(combined, lower_tail))
+            upper_value = float(np.nanpercentile(combined, upper_tail))
+
+            if not (np.isfinite(lower_value) and np.isfinite(upper_value)):
+                return
+
+            if np.isclose(lower_value, upper_value):
+                center = lower_value
+                span = max(abs(center) * y_limit_padding_fraction, 1.0)
+                axis.set_ylim(center - span, center + span)
+                return
+
+            span = upper_value - lower_value
+            padding = max(span * y_limit_padding_fraction, 1.0e-12)
+            axis.set_ylim(lower_value - padding, upper_value + padding)
+
+        apply_percentile_limits(
+            ax_temperature,
+            temperature_k,
+            temperature_lower,
+            temperature_upper,
+        )
+        apply_percentile_limits(
+            ax_pressure,
+            pressure_atm,
+            pressure_lower,
+            pressure_upper,
+        )
+        apply_percentile_limits(
+            ax_mole_fraction,
+            100.0 * co_mole_fraction,
+            None if co_mole_fraction_lower is None else 100.0 * co_mole_fraction_lower,
+            None if co_mole_fraction_upper is None else 100.0 * co_mole_fraction_upper,
+        )
+
+    if temperature_ylim is not None:
+        ax_temperature.set_ylim(*temperature_ylim)
+    if pressure_ylim is not None:
+        ax_pressure.set_ylim(*pressure_ylim)
+    if co_mole_fraction_percent_ylim is not None:
+        ax_mole_fraction.set_ylim(*co_mole_fraction_percent_ylim)
 
     return fig

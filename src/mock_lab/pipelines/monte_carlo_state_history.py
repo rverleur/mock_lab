@@ -26,16 +26,12 @@ from mock_lab.spectroscopy.state_estimation import (
     DEFAULT_OPTICAL_PATH_LENGTH_CM,
     StateHistory,
     build_state_history,
-    estimate_state_model_uncertainty,
     evaluate_state_from_fit_parameters,
 )
 from mock_lab.spectroscopy.voigt import (
     DEFAULT_CO_TRANSITIONS,
     Transition,
-    VoigtFitParameters,
     VoigtFitResult,
-    expand_constrained_parameters,
-    finite_difference_jacobian,
     fit_voigt_spectra,
     hitran_line_strength_to_cm2_atm,
 )
@@ -46,7 +42,7 @@ Array2D = NDArray[np.float64]
 Array3D = NDArray[np.float64]
 Bool2D = NDArray[np.bool_]
 
-MONTE_CARLO_VERSION = 5
+MONTE_CARLO_VERSION = 8
 STATE_COMPONENTS = ("temperature_k", "pressure_atm", "co_mole_fraction")
 SAMPLED_TRANSITION_PARAMETER_NAMES = (
     "center_cm_inv",
@@ -247,56 +243,18 @@ def _transition_sample_vector(transitions: tuple[Transition, ...]) -> Array2D:
     )
 
 
-def _state_fit_half_width(
-    fit_result: VoigtFitResult,
-    *,
-    transitions: tuple[Transition, ...],
-    optical_path_length_cm: float,
-) -> Array1D:
-    """Propagate one fit result's covariance into `[T, P, X_CO]` half-widths."""
-
-    if not (
-        np.all(np.isfinite(fit_result.reduced_parameter_vector))
-        and np.all(np.isfinite(fit_result.reduced_parameter_covariance))
-        and np.isfinite(fit_result.confidence_scale)
-    ):
-        return np.full(len(STATE_COMPONENTS), np.nan, dtype=float)
-
-    def state_vector(parameter_vector: Array1D) -> Array1D:
-        parameters = expand_constrained_parameters(
-            parameter_vector,
-            transitions=transitions,
-        )
-        return evaluate_state_from_fit_parameters(
-            parameters,
-            optical_path_length_cm=optical_path_length_cm,
-            transitions=transitions,
-            transition=transitions[0],
-            composition_model=DEFAULT_MIXTURE_COMPOSITION_MODEL,
-        )
-
-    state_jacobian = finite_difference_jacobian(
-        state_vector,
-        np.asarray(fit_result.reduced_parameter_vector, dtype=float),
-    )
-    state_covariance = (
-        state_jacobian
-        @ np.asarray(fit_result.reduced_parameter_covariance, dtype=float)
-        @ state_jacobian.T
-    )
-    state_standard_error = np.sqrt(
-        np.clip(np.diag(np.asarray(state_covariance, dtype=float)), a_min=0.0, a_max=None)
-    )
-    return np.asarray(fit_result.confidence_scale * state_standard_error, dtype=float)
-
-
 def _trial_outputs_from_fit_results(
     fit_results: tuple[VoigtFitResult | None, ...],
     *,
     transitions: tuple[Transition, ...],
     optical_path_length_cm: float,
 ) -> tuple[Array2D, Array2D, NDArray[np.bool_]]:
-    """Convert one trial's fit stack into nominal states and within-trial half-widths."""
+    """Convert one trial's fit stack into nominal states.
+
+    The Monte Carlo methodology uses the spread across independent trials as the
+    spectroscopy uncertainty. Per-trial fit covariance is not accumulated here;
+    it is taken only from the nominal fit run and combined later by RSS.
+    """
 
     scan_count = len(fit_results)
     temperature_k = np.full(scan_count, np.nan, dtype=float)
@@ -312,25 +270,7 @@ def _trial_outputs_from_fit_results(
         temperature_k[scan_index] = result.parameters.temperature_k
         collisional_hwhm_cm_inv[scan_index] = result.parameters.collisional_hwhm_cm_inv
         strongest_line_area_cm_inv[scan_index] = result.parameters.line_areas[0]
-        fit_half_width = _state_fit_half_width(
-            result,
-            transitions=transitions,
-            optical_path_length_cm=optical_path_length_cm,
-        )
-        model_form_half_width = estimate_state_model_uncertainty(
-            result.parameters,
-            optical_path_length_cm=optical_path_length_cm,
-            transitions=transitions,
-            transition=transitions[0],
-            composition_model=DEFAULT_MIXTURE_COMPOSITION_MODEL,
-            include_broadening_parameters=False,
-            include_bath_gas_model=False,
-            include_line_consistency=True,
-        )
-        fit_half_widths[scan_index] = np.sqrt(
-            np.clip(fit_half_width, a_min=0.0, a_max=None) ** 2
-            + np.clip(model_form_half_width, a_min=0.0, a_max=None) ** 2
-        )
+        fit_half_widths[scan_index] = np.nan
         success[scan_index] = bool(result.success)
 
     state_history = build_state_history(
@@ -514,9 +454,12 @@ def _initial_metadata(
             "Uniform line-center/linestrength sampling from HiTEMP bounds, "
             "uniform sampling of CO self-broadening plus the N2-equivalent "
             "bath-gas broadening within their 5% parameter bounds, "
-            "and a full Voigt refit for every Monte Carlo trial. The saved "
-            "within-trial half-widths also include the line-to-line pressure "
-            "consistency term."
+            "and a full Voigt refit for every Monte Carlo trial. Pressure "
+            "and CO mole fraction are then solved jointly from the strongest "
+            "transition FWHM equation plus the strongest-line area equation. "
+            "The Monte Carlo uncertainty comes only from variation across "
+            "independent trials; nominal fit covariance is added later from "
+            "the nominal spectroscopy run."
         ),
     }
 
@@ -698,7 +641,7 @@ def summarize_monte_carlo_samples(
     *,
     confidence_level: float,
 ) -> MonteCarloStateHistoryResult:
-    """Summarize trial states and combine refit MC with fit covariance by RSS."""
+    """Summarize trial states and combine MC spread with nominal fit covariance."""
 
     state_history_data = Path(state_history_data)
     output_dir = Path(output_dir)
@@ -710,20 +653,57 @@ def summarize_monte_carlo_samples(
         deterministic_temperature = np.asarray(data["temperature_k"], dtype=float)
         deterministic_pressure = np.asarray(data["pressure_atm"], dtype=float)
         deterministic_co_mole_fraction = np.asarray(data["co_mole_fraction"], dtype=float)
+        nominal_temperature_lower = np.asarray(data["temperature_ci95_lower"], dtype=float)
+        nominal_temperature_upper = np.asarray(data["temperature_ci95_upper"], dtype=float)
+        nominal_pressure_lower = np.asarray(data["pressure_ci95_lower"], dtype=float)
+        nominal_pressure_upper = np.asarray(data["pressure_ci95_upper"], dtype=float)
+        nominal_co_lower = np.asarray(data["co_mole_fraction_ci95_lower"], dtype=float)
+        nominal_co_upper = np.asarray(data["co_mole_fraction_ci95_upper"], dtype=float)
 
     lower_percentile = 50.0 * (1.0 - confidence_level)
     upper_percentile = 100.0 - lower_percentile
     mc_mean = np.nanmean(state_samples, axis=0)
     mc_lower = np.nanpercentile(state_samples, lower_percentile, axis=0)
     mc_upper = np.nanpercentile(state_samples, upper_percentile, axis=0)
-    fit_half_width_rms = np.sqrt(np.nanmean(fit_half_widths**2, axis=0))
+    nominal_fit_half_width = np.stack(
+        [
+            np.nanmax(
+                np.vstack(
+                    [
+                        np.abs(deterministic_temperature - nominal_temperature_lower),
+                        np.abs(nominal_temperature_upper - deterministic_temperature),
+                    ]
+                ),
+                axis=0,
+            ),
+            np.nanmax(
+                np.vstack(
+                    [
+                        np.abs(deterministic_pressure - nominal_pressure_lower),
+                        np.abs(nominal_pressure_upper - deterministic_pressure),
+                    ]
+                ),
+                axis=0,
+            ),
+            np.nanmax(
+                np.vstack(
+                    [
+                        np.abs(deterministic_co_mole_fraction - nominal_co_lower),
+                        np.abs(nominal_co_upper - deterministic_co_mole_fraction),
+                    ]
+                ),
+                axis=0,
+            ),
+        ],
+        axis=1,
+    )
 
     mc_lower_half_width = np.abs(mc_mean - mc_lower)
     mc_upper_half_width = np.abs(mc_upper - mc_mean)
-    total_lower = mc_mean - np.sqrt(mc_lower_half_width**2 + fit_half_width_rms**2)
-    total_upper = mc_mean + np.sqrt(mc_upper_half_width**2 + fit_half_width_rms**2)
-    fit_lower = mc_mean - fit_half_width_rms
-    fit_upper = mc_mean + fit_half_width_rms
+    total_lower = mc_mean - np.sqrt(mc_lower_half_width**2 + nominal_fit_half_width**2)
+    total_upper = mc_mean + np.sqrt(mc_upper_half_width**2 + nominal_fit_half_width**2)
+    fit_lower = mc_mean - nominal_fit_half_width
+    fit_upper = mc_mean + nominal_fit_half_width
 
     np.savez(
         _summary_path(output_dir),
@@ -1031,6 +1011,9 @@ def plot_monte_carlo_state_history(
                 f"{int(round(100.0 * confidence_level))}% total uncertainty"
             ),
             xlabel=r"Time [$\mu$s]",
+            temperature_ylim=(1000.0, 5000.0),
+            pressure_ylim=(-0.5, 4.5),
+            co_mole_fraction_percent_ylim=(0.0, 6.5),
         )
 
     output_path = figure_output_dir / "state_history_monte_carlo.png"

@@ -18,43 +18,312 @@
 \usepackage{booktabs}
 \usepackage{graphicx}
 \usepackage{hyperref}
+\usepackage[version=4]{mhchem}
 \usepackage{siunitx}
 \usepackage{subcaption}
 
 \hypersetup{
   colorlinks = false,
-  pdfauthor = {Your Name},
+  pdfauthor = {Rees Verleur},
   pdftitle = {ME 617 Mock Lab Report}
 }
 
 \singlespacing
 
 \title{ME 617 Mock Lab Report}
-\author{Your Name}
+\author{Rees Verleur}
 \date{\today}
 
 \begin{document}
 
 \maketitle
 
-\section{Introduction}
+\section{Introduction and Objectives}
+
+This mock lab uses scanned-wavelength absorption spectroscopy to recover temperature, pressure, and CO mole fraction in shocked gas. The data set contains a baseline scan, an etalon scan for time-to-wavenumber calibration, and repeated shock-tube scans across a CO feature group near \SI{2008.5}{\per\centi\meter}. The reduction converts detector voltage to absorbance for each laser sweep, fits the resulting spectrum with a constrained three-line Voigt model, and reconstructs the gas state as a function of time.
+
+The measurement couples a shock tube with a non-intrusive quantum cascade laser diagnostic. The overall workflow follows the same measurement logic as Mathews et al. [1], but is applied here to the provided course data and to the simplified modeling choices adopted for this report. The objective is to obtain scan-resolved temperature, pressure, and \ce{CO} mole fraction, then quantify the uncertainty associated with those estimates.
 
 \section{Theory}
 
+\subsection*{Shock-Tube Context}
+
+A shock tube produces an abrupt rise in gas temperature and pressure by separating a high-pressure driver gas from a lower-pressure driven gas with a diaphragm. After rupture, an incident shock propagates into the driven section and creates the compressed state known as Region 2. Reflection from the end wall further compresses and heats the gas while reducing the bulk velocity to nearly zero; the reflected-shock state is Region 5. Region 5 is usually the target state for shock-tube spectroscopy because it is hotter, denser, and closer to spatially uniform over the observation time of interest.
+
+Because the state change occurs over a very short time scale, shock tubes provide a well-defined starting point for high-temperature measurements. The optical section is therefore placed near the end wall to minimize the delay between incident- and reflected-shock arrival while avoiding the strongest end-wall disturbances. In this experiment, the measured CO absorption is used to recover scan-resolved temperature, pressure, and CO mole fraction through the shocked-gas event.
+
+\subsection*{Absorbance and Beer--Lambert Law}
+The starting point for direct absorption spectroscopy is the one-dimensional radiative-transfer equation. For a non-scattering medium,
+
+\begin{equation}
+  \frac{dI_{\tilde{\nu}}}{dx}
+  =
+  k_{\tilde{\nu}}\left(I_{\tilde{\nu}}^{\mathrm{bb}} - I_{\tilde{\nu}}\right)
+\end{equation}
+
+where $I_{\tilde{\nu}}$ is the spectral intensity at wavenumber $\tilde{\nu}$, $I_{\tilde{\nu}}^{\mathrm{bb}}$ is the blackbody intensity, and $k_{\tilde{\nu}}$ is the spectral absorption coefficient in cm$^{-1}$. If the path is uniform, integration over a path length $L$ gives
+
+\begin{equation}
+  I_{\tilde{\nu}}(L)
+  =
+  I_{\tilde{\nu},0}\exp(-k_{\tilde{\nu}}L)
+  +
+  I_{\tilde{\nu}}^{\mathrm{bb}}\left[1-\exp(-k_{\tilde{\nu}}L)\right]
+\end{equation}
+
+For the present measurements, laser intensity is much larger than gas self-emission, so the emission term is neglected. The transmitted intensity then reduces to the Beer--Lambert form,
+
+\begin{equation}
+  I_{\tilde{\nu}}(L)
+  =
+  I_{\tilde{\nu},0}\exp(-\kappa_{\tilde{\nu}}L)
+\end{equation}
+
+Under the independent-line approximation, the absorption coefficient is written as
+
+\begin{equation}
+  \kappa_{\tilde{\nu}}
+  =
+  \sum_i \kappa_{\tilde{\nu},i}
+  =
+  PX\sum_i S_i(T)\phi_i(\tilde{\nu})
+\end{equation}
+
+where $P$ is pressure in atm, $X$ is absorber mole fraction, $S_i(T)$ is the line strength in cm$^{-2}$/atm, and $\phi_i(\tilde{\nu})$ is a normalized line-shape function in cm. The absorbance model used throughout the analysis is therefore
+
+\begin{equation}
+  \alpha(\tilde{\nu})
+  =
+  \kappa_{\tilde{\nu}}L
+  =
+  PXL\sum_i S_i(T)\phi_i(\tilde{\nu})
+\end{equation}
+
+For a normalized line shape, the integrated absorbance area of line $i$ is $PXL\,S_i(T)$.
+
+\subsection*{Temperature-Dependent Line Strength}
+
+The line strength $S_i(T)$ is the integrated absorption strength of transition $i$. Reference values are taken from HiTEMP at a standard temperature $T_0$ and scaled to the local gas temperature with the standard HITRAN/HiTEMP correction,
+
+\begin{equation}
+  S_i(T)=S_i(T_0)\frac{Q(T_0)}{Q(T)}\frac{T_0}{T}
+  \exp\!\left[-\frac{hcE_i''}{k_B}\!\left(\frac{1}{T}-\frac{1}{T_0}\right)\right]
+  \frac{1-\exp\!\left(-\frac{hc\tilde{\nu}_{0,i}}{k_B T}\right)}{1-\exp\!\left(-\frac{hc\tilde{\nu}_{0,i}}{k_B T_0}\right)}
+\end{equation}
+
+Here $Q(T)$ is the molecular partition sum, $E_i''$ is the lower-state energy, and $\tilde{\nu}_{0,i}$ is the line center. The correction accounts for the changing partition function, Boltzmann population of the lower state, and stimulated emission. Differences in $S_i(T)$ among nearby transitions provide part of the temperature sensitivity of the measured spectrum.
+
+\subsection*{Line Shapes and Collisional Broadening}
+
+The line-shape function $\phi_i(\tilde{\nu})$ distributes the integrated line strength about the line center. For the present spectra, the important broadening mechanisms are Doppler broadening from thermal molecular motion and collisional broadening from intermolecular collisions. Natural broadening is negligible and is omitted.
+
+Doppler broadening produces a Gaussian contribution, while collisional broadening produces a Lorentzian contribution. When both are important, the line shape is well represented by a Voigt profile. For transition $i$,
+
+\begin{equation}
+  \phi_i(\tilde{\nu})
+  =
+  \phi_{V,i}\!\left[\tilde{\nu}-\tilde{\nu}_{0,i};\,\Delta\tilde{\nu}_{D,i},\,\Delta\tilde{\nu}_{C,i}\right]
+\end{equation}
+
+where $\Delta\tilde{\nu}_{D,i}$ and $\Delta\tilde{\nu}_{C,i}$ are the Doppler and collisional full widths at half maximum. The Doppler width follows from kinetic theory,
+
+\begin{equation}
+  \Delta\tilde{\nu}_{D,i}
+  =
+  2\tilde{\nu}_{0,i}
+  \sqrt{\frac{2k_B T \ln 2}{mc^2}}
+\end{equation}
+
+The collisional width depends on pressure and on the broadening properties of the collision partners. If the tabulated coefficients are given as Lorentz half-widths $\gamma_{k,i,\mathrm{ref}}$, the corresponding collisional FWHM is
+
+\begin{equation}
+  \Delta\tilde{\nu}_{C,i}(T)
+  =
+  2P\sum_k X_k\,\gamma_{k,i,\mathrm{ref}}
+  \left(\frac{T_{\mathrm{ref}}}{T}\right)^{n_{k,i}}
+\end{equation}
+
+where $X_k$ is the mole fraction of collision partner $k$ and $n_{k,i}$ is the corresponding temperature exponent. In this problem, the Doppler contribution carries most of the direct temperature sensitivity, while the collisional contribution carries most of the direct pressure sensitivity.
+
 \section{Experimental Setup and Procedure}
+
+\subsection*{Shock-Tube and Optical Setup}
+
+Measurements were acquired in Purdue's High-Pressure Shock Tube. The driven gas was 2\% CO, 1.8\% \ce{CO2}, and balance \ce{N2}. After diaphragm rupture, the incident shock produced Region 2 and reflection from the end wall produced Region 5 at the optical test section. The handout target for Region 5 was approximately \SI{4000}{K} and \SI{1}{atm}. The shock-tube internal diameter, and therefore the absorption path length used here, was \SI{10.32}{cm}.
+
+A quantum cascade laser near \SI{4.98}{\micro\meter} scanned the CO feature group by current modulation. The applied modulation was \SIrange{0}{620}{mV} at \SI{300}{kHz}, giving one sweep every \SI{3.33}{\micro\second}. Because QCL tuning is partly thermal, the frequency sweep is only approximately repeatable from scan to scan, so a separate frequency calibration is required. The transmitted beam was measured with a detector whose voltage output was taken to be linear in incident optical intensity.
+
+\subsection*{Measurement Procedure and Calibration Data}
+
+The analysis uses three provided datasets: a baseline scan with no absorbing gas in the beam path, an etalon scan, and the shock-tube measurement. Each file also contains a TTL reference from the function generator, which is used to align the repeated sweeps. The baseline data define the unabsorbed transmission, and the shocked-gas transmission is compared against that baseline to obtain absorbance.
+
+The etalon measurement determines how laser frequency changes during each sweep. A solid germanium Fabry--Perot etalon, 3 in. long, was placed in the beam path. Interference between the transmitted and reflected beams produces periodic maxima as the wavelength is scanned. The spacing between adjacent maxima is the free spectral range,
+
+\begin{equation}
+  \mathrm{FSR} = \frac{1}{2nL}
+  \approx
+  \SI{0.0163}{\per\centi\meter},
+\end{equation}
+
+where $L = \SI{7.62}{cm}$ and the refractive index of germanium at this wavelength is $n = 4.019$. This periodic reference provides the time-to-wavenumber calibration used for the shock and baseline scans.
+
+\subsection*{Scanned CO Transitions}
+
+The scan window covered the three CO transitions listed below.
+
+\begin{table}[h]
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{5pt}
+  \caption{Spectroscopic parameters for the scanned CO transitions.}
+  \label{tab:co-transitions}
+  \resizebox{\textwidth}{!}{%
+    \begin{tabular}{lccccccc}
+      \toprule
+      Transition & $\tilde{\nu}_0$ & $S_{\mathrm{ref}}(T_0 = 296\,\mathrm{K})$ & $E''$ & $\gamma_{\ce{CO}-\ce{N2}}$ & $n_{\ce{N2}}$ & $\gamma_{\ce{CO}-\ce{CO}}$ & $n_{\ce{CO}}$ \\
+      & [cm$^{-1}$] & [cm$^{-1}$/(\mbox{molec-cm}$^{-2}$)] & [cm$^{-1}$] & [cm$^{-1}$/atm] & [-] & [cm$^{-1}$/atm] & [-] \\
+      \midrule
+      P(0,31) & 2008.525 & 2.669e-22 & 1901.131 & 0.0412 & 0.47 & 0.0430 & 0.5 \\
+      P(2,20) & 2008.422 & 1.149e-28 & 5051.740 & 0.0526 & 0.57 & 0.0550 & 0.5 \\
+      P(3,14) & 2008.552 & 2.877e-32 & 6742.874 & 0.0607 & 0.65 & 0.0610 & 0.5 \\
+      \bottomrule
+    \end{tabular}%
+  }
+\end{table}
+
+These three transitions are a useful set because they fall within a single QCL scan window but span large differences in line strength and lower-state energy, so the combined spectrum carries temperature sensitivity through the relative peak strengths and pressure/composition sensitivity through the line area and collisional broadening.
 
 \section{Data Reduction}
 
+\subsection*{Signal Loading and Sweep Extraction}
+
+\begin{itemize}
+  \item Explain that the MAT files are loaded and converted into time histories using the recorded sampling interval.
+  \item Describe how each scan window is extracted so that it starts with a small portion of baseline, includes the laser ramp, and ends with a small amount of trailing baseline.
+  \item State that this choice slightly sacrifices edge data in exchange for consistent scan alignment.
+\end{itemize}
+
+\subsection*{Baseline Treatment and Absorbance Construction}
+
+\begin{itemize}
+  \item Explain that an average baseline sweep is formed from all baseline scans.
+  \item Describe the wing-based baseline correction: a line is fit through the first and last 32 samples of each sweep and subtracted so that low-frequency drift within one scan is reduced.
+  \item State that the shocked scan is scaled to the baseline peak before absorbance is formed.
+  \item Explain the plotting window used for absorbance: only the region where the corrected average baseline is between about \SI{1.0}{V} and \SI{2.75}{V} is retained.
+\end{itemize}
+
+\paragraph{Suggested figure.}
+Use the existing figure \path{results/figures/baseline_shock_overlay.png} to show the corrected baseline and shocked signals over one representative scan.
+
+\paragraph{Suggested figure.}
+Use the existing figure \path{results/figures/shock_absorbance_time.png} to show the absorbance signal before converting to frequency.
+
+\subsection*{Etalon Calibration}
+
+\begin{itemize}
+  \item Explain that the etalon trace is used to map scan time to relative wavenumber.
+  \item State that the etalon data are averaged over scans, peak locations are identified, and a third-order polynomial is fit over the useful portion of the ramp.
+  \item Note that the present calibration is relative rather than an absolute frequency standard.
+\end{itemize}
+
+\begin{equation}
+  \Delta\tilde{\nu}(t)=a_0+a_1 t+a_2 t^2+a_3 t^3
+\end{equation}
+
+\paragraph{Suggested figure.}
+Use the existing figures \path{results/figures/etalon_sweep.png} and \path{results/figures/etalon_calibration.png} as a two-panel figure.
+
+\paragraph{Suggested figure.}
+Use the existing figure \path{results/figures/shock_absorbance_frequency.png} to show one representative absorbance spectrum on the calibrated frequency axis.
+
 \section{Results and Discussion}
+
+\subsection*{Voigt-Fit Structure}
+
+\begin{itemize}
+  \item Explain that each scan is fit with a constrained sum of three Voigt profiles.
+  \item State clearly which quantities are free and which are constrained:
+  \begin{itemize}
+    \item a shared temperature through the Doppler contribution,
+    \item a dominant integrated-area parameter tied to the strongest transition,
+    \item constrained weaker-line areas based on temperature-dependent line-strength ratios,
+    \item limited line-center movement to preserve transition identity,
+    \item shared or linked collisional-width structure for the weaker transitions.
+  \end{itemize}
+  \item Explain why the constraints are necessary: without them, the optimizer can swap line identities when fitting partially overlapping peaks.
+\end{itemize}
+
+\begin{equation}
+  \int A_i(\tilde{\nu})\,d\tilde{\nu}=S_i(T)\,P\,X_{\mathrm{CO}}\,L
+\end{equation}
+
+\begin{itemize}
+  \item Explain that the reported temperature is taken directly from the Voigt-fit Doppler term.
+  \item State that pressure and CO mole fraction are then solved simultaneously with temperature held fixed, using only the strongest-transition collisional FWHM together with the strongest-line integrated-area equation.
+  \item Note that the weaker transitions still stabilize the spectral fit and improve the temperature estimate, but they are not used directly in the final pressure solve because one weak-line width is constrained during the fit.
+\end{itemize}
+
+\paragraph{Suggested figure.}
+Use the existing figure \path{results/figures/shock_voigt_fit.png} to show the measured absorbance, total fit, and the individual Voigt contributions.
+
+\subsection*{Recovered State Histories}
+
+\begin{itemize}
+  \item Present the recovered temperature, pressure, and CO mole-fraction histories as the main result of the report.
+  \item Discuss the broad trends over time and identify any early-time region where the fits are visibly less stable.
+  \item Comment on whether the temperature, pressure, and concentration histories are qualitatively consistent with the expected shocked-gas behavior.
+  \item If needed, separate the discussion into “physically credible window” and “less reliable early-time window.”
+\end{itemize}
+
+\paragraph{Suggested figure.}
+Use the existing figure \path{results/figures/state_history.png} as the main results figure.
 
 \section{Uncertainty}
 
+\subsection*{Fit and Spectroscopic Contributions}
+
+\begin{itemize}
+  \item Explain that two uncertainty sources are included: the local covariance returned by the nonlinear fit and a Monte Carlo treatment of uncertain spectroscopic inputs.
+  \item State that the Monte Carlo samples uniformly inside the bounds implied by the HiTEMP uncertainty codes, consistent with the NIST guidance used in the code.
+  \item Note that the full Monte Carlo reruns the Voigt fit for every trial rather than perturbing only the post-processed state calculation.
+  \item State that the broadening coefficients and exponents are varied by the adopted $\pm 5\%$ bounds, while the line positions and line strengths use the decoded HiTEMP bounds.
+\end{itemize}
+
+\begin{equation}
+  \sigma_{\mathrm{total}}^2 = \sigma_{\mathrm{fit}}^2 + \sigma_{\mathrm{spec}}^2
+\end{equation}
+
+\begin{itemize}
+  \item Explain that the pressure uncertainty should be discussed carefully because it depends on both the nominal fit covariance and the broadening-model perturbations sampled in the full-refit Monte Carlo.
+  \item State explicitly that the largest remaining model assumption is the treatment of all non-CO collisions as a nitrogen-equivalent bath gas.
+\end{itemize}
+
+\paragraph{Suggested figure.}
+Use the existing figure \path{results/figures/state_history_monte_carlo.png} to show the mean state histories and the uncertainty bands. If page count is tight, move this figure to the appendix and summarize the uncertainty in the main text.
+
 \section{Conclusions}
 
+\begin{itemize}
+  \item Summarize the analysis chain in one sentence: raw scans were reduced to absorbance spectra, calibrated in frequency, fit with a constrained three-line model, and converted into time-resolved state estimates.
+  \item State what was learned from the recovered temperature, pressure, and CO mole-fraction histories.
+  \item Identify the dominant remaining limitations: relative frequency calibration, simplified bath-gas broadening treatment, and sensitivity of the weakest transition.
+  \item End with one or two specific improvements that would most strengthen the measurement if the experiment were repeated.
+\end{itemize}
+
 \section*{References}
+
+\begin{enumerate}
+  \item G. C. Mathews, M. G. Blaisdell, A. I. Lemcherfi, C. D. Slabaugh, and C. S. Goldenstein, ``High-bandwidth absorption-spectroscopy measurements of temperature, pressure, CO, and H$_2$O in the annulus of a rotating detonation rocket engine,'' \textit{Applied Physics B}, 2021. doi:10.1007/s00340-021-07703-9.
+\end{enumerate}
 
 \appendix
 
 \section{Appendix}
+
+\begin{itemize}
+  \item Include any extended uncertainty discussion that does not fit in the main text.
+  \item Move secondary plots here if the main text becomes too figure-heavy.
+  \item Possible appendix items: table of transition parameters, additional fit snapshots, or Monte Carlo implementation details.
+\end{itemize}
 
 \end{document}

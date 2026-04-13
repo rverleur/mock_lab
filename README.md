@@ -315,8 +315,10 @@ The current reported quantities are built as follows:
 - the pressure model uses the paper-table `gamma_ref` and `n` values for CO self-broadening and an N2-equivalent bath gas
 - the only composition quantity solved explicitly in the pressure model is `X_CO`
 - every non-CO collision partner is treated as part of the same effective bath gas, following the simplification allowed in the handout
-- per-line pressures are computed from the fitted collisional widths and then averaged
-- CO mole fraction is estimated from the strongest fitted line area only, but it is solved self-consistently with pressure because the pressure model itself depends on the CO mole fraction
+- pressure and CO mole fraction are solved simultaneously rather than sequentially
+- the solve uses only the strongest-transition collisional FWHM together with the strongest-line integrated-area equation
+- the tabulated broadening coefficients are multiplied by the handout's `0.84` scale factor inside that simultaneous state solve
+- the weaker transitions still influence the fitted temperature and the overall spectral fit quality, but they are not used directly in the final `P` / `X_CO` state solve
 
 The strongest-line area is converted to mole fraction using:
 
@@ -347,17 +349,34 @@ The current optical path length is fixed in `src/mock_lab/spectroscopy/state_est
 ### Pressure Model
 
 The active pressure solve in `src/mock_lab/spectroscopy/state_estimation.py`
-iterates only on `X_CO`. For each sweep it uses:
-
-- `src/mock_lab/spectroscopy/collisional_broadening.py`
-
-and forms one effective broadening coefficient for each transition:
+holds the fitted temperature fixed and solves directly for `P` and `X_CO`.
+For each sweep it uses the strongest fitted transition, `P(0,31)`, and forms
+one effective broadening coefficient for that line:
 
 - `gamma_eff(T, X_CO) = X_CO * gamma_CO(T) + (1 - X_CO) * gamma_bath(T)`
 
 where `gamma_bath` is the N2-equivalent bath-gas broadening coefficient. The
-pressure estimate is then obtained from the fitted collisional widths and the
-effective broadening coefficients. This is simpler than the earlier
+temperature dependence of each collision-partner coefficient is
+
+- `gamma_k(T) = gamma_k,ref * (T_ref / T)^n_k`
+
+The Voigt fit itself returns Lorentz HWHM values because
+`scipy.special.voigt_profile` is parameterized that way. The state reduction
+then converts the strongest-line fitted width to collisional FWHM and solves
+
+- `Delta_nu_C = 2 P * 0.84 * gamma_eff(T, X_CO)`
+- `Area = S(T) * P * X_CO * L`
+
+simultaneously for `P` and `X_CO`.
+
+The `0.84` factor is applied directly to the tabulated collisional-broadening
+coefficients inside the simultaneous state solve. It is not a post-processing
+pressure correction in the current code. That choice matters because it raises
+the solved pressure and lowers the solved CO mole fraction in a self-consistent
+way.
+
+This matters because line-strength uncertainty can now couple back into the
+reported pressure, not just the reported mole fraction. This is simpler than the earlier
 species-by-species mixture model and is the current recommended path because it
 matches the handout guidance more closely and removes the least defensible
 composition assumption from the repo.
@@ -418,6 +437,14 @@ The selected transition metadata and decoded uncertainties can be exported with:
 The second uncertainty source is the local fit covariance based on the fitted
 Jacobian.
 
+The active pressure-broadening coefficients and exponents do not come from the
+HiTEMP uncertainty codes, because the code no longer uses the HiTEMP air-
+broadening values for the pressure model. Instead, the active `CO` and
+N2-equivalent bath-gas broadening parameters come from the literature table in
+`src/mock_lab/spectroscopy/voigt.py`, and each of those parameters is assigned
+a fixed relative uncertainty of `5%` in
+`src/mock_lab/spectroscopy/collisional_broadening.py`.
+
 In `src/mock_lab/spectroscopy/voigt.py`:
 
 - the `least_squares` Jacobian is used to estimate a reduced-parameter covariance matrix
@@ -427,19 +454,25 @@ In `src/mock_lab/spectroscopy/voigt.py`:
 In `src/mock_lab/pipelines/time_history.py`:
 
 - the saved fit covariance is propagated into the reported temperature, pressure, and CO mole fraction
-- the pressure and mole-fraction bands include a second deterministic layer on top of the fit covariance
-- that deterministic layer currently includes:
-  5% on CO self-broadening `gamma_ref` and `n`
-  5% on the N2-equivalent bath-gas `gamma_ref` and `n`
-  a line-consistency term based on how strongly the line-by-line pressure estimates disagree for the fitted sweep
-- the fit and model contributions are combined in quadrature for the plotted
-  pressure and CO-mole-fraction bands
-- the state-history figure is drawn with shaded 95% confidence bands
+- the deterministic `state_history` confidence bands are now covariance-only bands from the nominal spectroscopy fit
+- no extra broadening-model or line-consistency term is added on top of that nominal fit covariance inside `state_history.npz`
+- the state-history figure is drawn with shaded 95% confidence bands from that nominal fit covariance
 
-That line-consistency term matters. Without it, the early-time pressure
-uncertainty can be much too small because the local fit covariance alone does
-not fully reflect how badly the individual transition pressures disagree when
-the spectrum is weak or poorly constrained.
+Temperature uncertainty is large for two reasons. First, the local fit
+covariance can be large when the three transitions overlap strongly and the
+early-time spectra are weak, because the shared temperature competes with the
+strongest-line area, the shared weak-line width, and the baseline terms inside
+the constrained Voigt fit. Second, the Monte Carlo does perturb spectroscopic
+inputs that affect temperature directly:
+
+- line positions from the HiTEMP line-center uncertainty bounds
+- reference line strengths from the HiTEMP line-strength uncertainty bounds
+
+Those quantities enter the fit itself through the line placement and the
+temperature-dependent line-strength ratios. Broadening-parameter jitter does
+not directly change the Doppler temperature fit, but line-center and
+line-strength jitter do, and the resulting refits can move temperature
+substantially when the spectrum is only weakly informative.
 
 ## Spectroscopic Monte Carlo Summary
 
@@ -481,18 +514,25 @@ the saved Monte Carlo distribution now includes both:
 - the effect of that changed fit on the derived `T`, `P`, and `X_CO`
 
 Only the line positions and line strengths alter the spectral fit itself. The
-broadening coefficients and exponents alter the post-fit pressure /
-mole-fraction reduction for each trial. The Monte Carlo summary then combines:
+broadening coefficients and exponents alter the post-fit state solve for each
+trial, where the handout `0.84` factor is applied inside the broadening model.
+Because pressure and mole fraction are now solved jointly from linewidth and
+area, line-strength jitter can influence pressure as well as mole fraction.
+The Monte Carlo summary then combines:
 
 - trial-to-trial spread from the full refit with jittered spectroscopy
-- per-trial local fit covariance
-- per-trial line-consistency uncertainty
+- nominal-fit covariance from `results/tables/state_history.npz`
 
 The independent uncertainty sources are combined in the saved summary as:
 
 - full-refit Monte Carlo uncertainty from the trial distribution
-- fit-plus-line-consistency uncertainty from the per-trial local bands
+- nominal-fit uncertainty from the unjittered spectroscopy run
 - total uncertainty from root-sum-square combination of those two half-widths
+
+There is no within-trial uncertainty term in the Monte Carlo summary. Each
+trial is treated as one independent draw of the spectroscopic inputs, and the
+Monte Carlo uncertainty comes only from variation across those independent trial
+solutions.
 
 The run is checkpointed to:
 
@@ -595,7 +635,8 @@ They are thin wrappers around the underlying package code and are the easiest pl
 - the etalon calibration is relative rather than absolute
 - the pressure reduction assumes all non-CO collision partners may be treated as one N2-equivalent bath gas; this is handout-supported but not a fully reacting-mixture broadening model
 - the mole-fraction reduction currently uses only the strongest transition area
-- the deterministic uncertainty bands are not purely covariance-based anymore, but they still do not include every possible model-form error
+- the deterministic uncertainty bands in `state_history` are nominal-fit covariance bands only
+- the wider reported spectroscopy uncertainty is intended to come from the full-refit Monte Carlo, not from an extra deterministic pressure-model term
 - the full-refit Monte Carlo is computationally expensive because every trial reruns the Voigt fit across the full sweep stack
 
 ## Physically Important Assumptions
@@ -609,4 +650,4 @@ These are the assumptions that still matter most for the reported results:
 - the CO mole fraction is reduced from the strongest line area only
 - the optical path length is fixed at `10.32 cm`
 - the frequency calibration is relative, not absolute
-- the early-time pressure band is strongly influenced by the line-consistency term because the fitted lines often disagree there
+- the early-time pressure band can still become large because the strongest-line width fit is poorly conditioned when the absorbance signal is weak

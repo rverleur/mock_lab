@@ -67,11 +67,11 @@ if __name__ == "__main__":
 
     trial_count = 1000
     chunk_size = 100
-    workers = 4
+    workers = 12
     seed = 617
     confidence_level = 0.95
     minimum_peak_absorbance = 0.02
-    force_restart = False
+    force_restart = True
 
     main(
         voigt_fit_data=voigt_fit_data,

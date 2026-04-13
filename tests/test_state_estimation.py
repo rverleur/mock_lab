@@ -5,10 +5,13 @@ from mock_lab.spectroscopy.collisional_broadening import (
 )
 from mock_lab.spectroscopy.state_estimation import (
     DEFAULT_OPTICAL_PATH_LENGTH_CM,
+    DEFAULT_PRESSURE_BROADENING_SCALE,
     build_state_history,
     corrected_pressure_from_broadening,
     estimate_co_mole_fraction,
     estimate_line_consistency_uncertainty,
+    estimate_state_model_uncertainty,
+    solve_pressure_and_co_mole_fraction,
 )
 from mock_lab.spectroscopy.voigt import (
     DEFAULT_CO_TRANSITIONS,
@@ -17,11 +20,14 @@ from mock_lab.spectroscopy.voigt import (
 )
 
 
-def test_corrected_pressure_is_identity_by_default() -> None:
+def test_corrected_pressure_applies_handout_scale() -> None:
     apparent_pressure = np.array([1.0, 2.0, np.nan])
     corrected_pressure = corrected_pressure_from_broadening(apparent_pressure)
 
-    assert np.allclose(corrected_pressure[:2], np.array([1.0, 2.0]))
+    assert np.allclose(
+        corrected_pressure[:2],
+        apparent_pressure[:2] / DEFAULT_PRESSURE_BROADENING_SCALE,
+    )
     assert np.isnan(corrected_pressure[2])
 
 
@@ -63,6 +69,7 @@ def test_build_state_history_constructs_scan_axis() -> None:
         collisional_hwhm[index] = np.asarray(
             [
                 expected_pressure[index]
+                * DEFAULT_PRESSURE_BROADENING_SCALE
                 * effective_bath_gas_broadening_coefficient_cm_inv_atm(
                     transition.broadening_by_species,
                     float(expected_temperature[index]),
@@ -72,6 +79,12 @@ def test_build_state_history_constructs_scan_axis() -> None:
             ],
             dtype=float,
         )
+    # The strongest transition now drives the pressure / X_CO solve directly,
+    # so weaker-line widths should not affect the recovered state.
+    collisional_hwhm[0, 1] *= 0.15
+    collisional_hwhm[1, 1] *= 3.5
+    collisional_hwhm[0, 2] *= 3.0
+    collisional_hwhm[1, 2] *= 0.25
     strongest_line_area = np.array(
         [
             line_strength_at_temperature(float(expected_temperature[0]), DEFAULT_CO_TRANSITIONS[0])
@@ -103,7 +116,41 @@ def test_build_state_history_constructs_scan_axis() -> None:
     )
 
 
-def test_line_consistency_uncertainty_is_positive_for_inconsistent_widths() -> None:
+def test_solve_pressure_and_co_mole_fraction_recovers_synthetic_state() -> None:
+    expected_temperature = 1950.0
+    expected_pressure = 1.85
+    expected_co_mole_fraction = 0.21
+    collisional_hwhm = np.asarray(
+        [
+            expected_pressure
+            * DEFAULT_PRESSURE_BROADENING_SCALE
+            * effective_bath_gas_broadening_coefficient_cm_inv_atm(
+                transition.broadening_by_species,
+                expected_temperature,
+                expected_co_mole_fraction,
+            )
+            for transition in DEFAULT_CO_TRANSITIONS
+        ],
+        dtype=float,
+    )
+    strongest_line_area = (
+        line_strength_at_temperature(expected_temperature, DEFAULT_CO_TRANSITIONS[0])
+        * expected_pressure
+        * expected_co_mole_fraction
+        * DEFAULT_OPTICAL_PATH_LENGTH_CM
+    )
+
+    state = solve_pressure_and_co_mole_fraction(
+        expected_temperature,
+        collisional_hwhm,
+        strongest_line_area,
+    )
+
+    assert np.isclose(state.pressure_atm, expected_pressure, rtol=1.0e-6)
+    assert np.isclose(state.co_mole_fraction, expected_co_mole_fraction, rtol=1.0e-6)
+
+
+def test_line_consistency_uncertainty_is_zero_with_strongest_line_only_pressure() -> None:
     parameters = VoigtFitParameters(
         temperature_k=1800.0,
         line_centers_relative_cm_inv=np.array([0.0, -0.10, 0.03], dtype=float),
@@ -115,6 +162,58 @@ def test_line_consistency_uncertainty_is_positive_for_inconsistent_widths() -> N
 
     half_width = estimate_line_consistency_uncertainty(parameters)
 
-    assert half_width[0] == 0.0
-    assert half_width[1] > 0.0
-    assert half_width[2] > 0.0
+    assert np.allclose(half_width, np.zeros(3))
+
+
+def test_line_consistency_uncertainty_ignores_weaker_line_widths() -> None:
+    expected_temperature = 1800.0
+    expected_pressure = 1.4
+    expected_co_mole_fraction = 0.16
+    line_widths = np.asarray(
+        [
+            expected_pressure
+            * DEFAULT_PRESSURE_BROADENING_SCALE
+            * effective_bath_gas_broadening_coefficient_cm_inv_atm(
+                transition.broadening_by_species,
+                expected_temperature,
+                expected_co_mole_fraction,
+            )
+            for transition in DEFAULT_CO_TRANSITIONS
+        ],
+        dtype=float,
+    )
+    line_widths[1] *= 0.1
+    line_widths[2] *= 4.0
+    line_area = (
+        line_strength_at_temperature(expected_temperature, DEFAULT_CO_TRANSITIONS[0])
+        * expected_pressure
+        * expected_co_mole_fraction
+        * DEFAULT_OPTICAL_PATH_LENGTH_CM
+    )
+    parameters = VoigtFitParameters(
+        temperature_k=expected_temperature,
+        line_centers_relative_cm_inv=np.array([0.0, -0.10, 0.03], dtype=float),
+        collisional_hwhm_cm_inv=line_widths,
+        line_areas=np.array([line_area, line_area * 0.05, line_area * 0.02], dtype=float),
+        baseline_offset=0.0,
+        baseline_slope=0.0,
+    )
+
+    half_width = estimate_line_consistency_uncertainty(parameters)
+
+    assert np.allclose(half_width, np.zeros(3))
+
+
+def test_state_model_uncertainty_remains_finite_for_large_pressure_mismatch() -> None:
+    parameters = VoigtFitParameters(
+        temperature_k=1750.0,
+        line_centers_relative_cm_inv=np.array([0.0, -0.10, 0.03], dtype=float),
+        collisional_hwhm_cm_inv=np.array([0.15, 1.0e-6, 1.0e-6], dtype=float),
+        line_areas=np.array([0.01, 5.0e-4, 1.0e-4], dtype=float),
+        baseline_offset=0.0,
+        baseline_slope=0.0,
+    )
+
+    half_width = estimate_state_model_uncertainty(parameters)
+
+    assert np.all(np.isfinite(half_width))

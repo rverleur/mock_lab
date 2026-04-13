@@ -87,6 +87,28 @@ def effective_bath_gas_broadening_coefficient_cm_inv_atm(
     return float(co_term + bath_term)
 
 
+def effective_bath_gas_broadening_fwhm_coefficient_cm_inv_atm(
+    broadening_by_species: dict[str, CollisionPartnerBroadening],
+    temperature_k: float,
+    co_mole_fraction: float,
+) -> float:
+    """Return the two-partner effective collisional FWHM coefficient.
+
+    The table values are treated as Lorentz HWHM coefficients. The pressure
+    reduction now works in the full-width-at-half-maximum convention, so this
+    helper simply returns `2 * gamma_eff`.
+    """
+
+    return float(
+        2.0
+        * effective_bath_gas_broadening_coefficient_cm_inv_atm(
+            broadening_by_species,
+            temperature_k,
+            co_mole_fraction,
+        )
+    )
+
+
 def bath_gas_model_half_widths(
     broadening_by_species: dict[str, CollisionPartnerBroadening],
 ) -> tuple[float, float]:

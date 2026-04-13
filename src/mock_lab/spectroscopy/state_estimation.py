@@ -6,12 +6,14 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.optimize import least_squares
 
 from mock_lab.spectroscopy.collisional_broadening import (
     BATH_GAS_REFERENCE_SPECIES,
     DEFAULT_MIXTURE_COMPOSITION_MODEL,
     MixtureCompositionModel,
     bath_gas_model_half_widths,
+    effective_bath_gas_broadening_fwhm_coefficient_cm_inv_atm,
     effective_bath_gas_broadening_coefficient_cm_inv_atm,
 )
 from mock_lab.spectroscopy.voigt import (
@@ -26,8 +28,9 @@ Array1D = NDArray[np.float64]
 Array2D = NDArray[np.float64]
 
 DEFAULT_OPTICAL_PATH_LENGTH_CM = 10.32
-DEFAULT_PRESSURE_BROADENING_SCALE = 1.0
+DEFAULT_PRESSURE_BROADENING_SCALE = 0.84
 DEFAULT_STATE_SOLVER_ITERATIONS = 10
+PRESSURE_SOLVE_TRANSITION_INDEX = 0
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,14 @@ class StateEstimate:
     collision_partner_mole_fractions: dict[str, float]
 
 
+def _pressure_transition_index(transition_count: int) -> int | None:
+    """Return the transition index used for pressure / mole-fraction recovery."""
+
+    if 0 <= PRESSURE_SOLVE_TRANSITION_INDEX < transition_count:
+        return PRESSURE_SOLVE_TRANSITION_INDEX
+    return None
+
+
 def _co_mole_fraction_from_pressure(
     temperature_k: float,
     pressure_atm: float,
@@ -61,7 +72,14 @@ def _co_mole_fraction_from_pressure(
     optical_path_length_cm: float,
     transition: Transition,
 ) -> float:
-    """Return the CO mole fraction implied by one pressure estimate."""
+    """Return the physically bounded CO mole fraction implied by one pressure.
+
+    This helper is used during uncertainty propagation. When a perturbed
+    pressure approaches zero, the raw algebraic value from `Area / (SPL)` can
+    become arbitrarily large even though a mole fraction cannot exceed one.
+    Clipping here prevents meaningless super-physical values from dominating
+    the uncertainty combination.
+    """
 
     value = estimate_co_mole_fraction(
         np.array([temperature_k], dtype=float),
@@ -70,7 +88,147 @@ def _co_mole_fraction_from_pressure(
         optical_path_length_cm=optical_path_length_cm,
         transition=transition,
     )[0]
+    if np.isfinite(value):
+        value = float(np.clip(value, 0.0, 0.999))
     return float(value)
+
+
+def _root_sum_square(values: Array2D) -> Array1D:
+    """Return an overflow-safe RSS combination along axis 0.
+
+    The uncertainty propagation can occasionally produce very large but finite
+    intermediate values on weak or inconsistent early-time sweeps. Computing
+    RSS with a direct `values**2` can overflow even when the final result only
+    needs to be treated as "very large". This helper rescales each column
+    before squaring, which is numerically stable.
+    """
+
+    matrix = np.asarray(values, dtype=float)
+
+    if matrix.ndim == 1:
+        matrix = matrix[np.newaxis, :]
+
+    finite_abs = np.where(np.isfinite(matrix), np.abs(matrix), np.nan)
+    scale = np.nanmax(finite_abs, axis=0)
+    combined = np.zeros(matrix.shape[1], dtype=float)
+
+    valid = np.isfinite(scale) & (scale > 0.0)
+    if np.any(valid):
+        normalized = matrix[:, valid] / scale[valid]
+        normalized[~np.isfinite(normalized)] = 0.0
+        combined[valid] = scale[valid] * np.sqrt(np.sum(normalized**2, axis=0))
+
+    no_finite = ~np.isfinite(scale)
+    combined[no_finite] = np.nan
+    return np.asarray(combined, dtype=float)
+
+
+def _effective_broadening_vector(
+    temperature_k: float,
+    co_mole_fraction: float,
+    transitions: tuple[Transition, ...],
+    *,
+    broadening_scale: float = DEFAULT_PRESSURE_BROADENING_SCALE,
+) -> Array1D:
+    """Return the per-transition Lorentz HWHM coefficients in `cm^-1/atm`.
+
+    The handout recommends scaling the tabulated collisional-broadening
+    coefficients by `0.84` when using them to infer pressure. The active state
+    solve applies that factor directly to the broadening coefficients rather
+    than post-correcting the solved pressure, so the same scaled model enters
+    both the linewidth equation and the area-based CO-mole-fraction solve.
+    """
+
+    return np.asarray(
+        [
+            broadening_scale
+            * effective_bath_gas_broadening_coefficient_cm_inv_atm(
+                transition_value.broadening_by_species,
+                float(temperature_k),
+                float(co_mole_fraction),
+            )
+            for transition_value in transitions
+        ],
+        dtype=float,
+    )
+
+
+def _effective_broadening_fwhm_vector(
+    temperature_k: float,
+    co_mole_fraction: float,
+    transitions: tuple[Transition, ...],
+    *,
+    broadening_scale: float = DEFAULT_PRESSURE_BROADENING_SCALE,
+) -> Array1D:
+    """Return the per-transition collisional FWHM coefficients in `cm^-1/atm`."""
+
+    return np.asarray(
+        [
+            broadening_scale
+            * effective_bath_gas_broadening_fwhm_coefficient_cm_inv_atm(
+                transition_value.broadening_by_species,
+                float(temperature_k),
+                float(co_mole_fraction),
+            )
+            for transition_value in transitions
+        ],
+        dtype=float,
+    )
+
+
+def _state_residual_vector(
+    state_vector: Array1D,
+    *,
+    temperature_k: float,
+    collisional_hwhm_cm_inv: Array1D,
+    integrated_area_cm_inv: float,
+    optical_path_length_cm: float,
+    transitions: tuple[Transition, ...],
+    transition: Transition,
+    pressure_transition_index: int,
+    broadening_scale: float,
+) -> Array1D:
+    """Return dimensionless residuals for the coupled `P` / `X_CO` solve.
+
+    The state solve uses:
+
+    - one strongest-line integrated-area equation
+    - one strongest-line collisional FWHM equation
+
+    The fit itself still optimizes the Voigt Lorentz HWHM because
+    `scipy.special.voigt_profile` requires that parameterization. The state
+    reduction converts that fitted width to FWHM before solving the pressure
+    relation.
+    """
+
+    pressure_atm = float(state_vector[0])
+    co_mole_fraction = float(state_vector[1])
+
+    effective_broadening_fwhm = _effective_broadening_fwhm_vector(
+        temperature_k,
+        co_mole_fraction,
+        transitions,
+        broadening_scale=broadening_scale,
+    )
+    measured_fwhm = float(2.0 * collisional_hwhm_cm_inv[pressure_transition_index])
+    modeled_fwhm = float(
+        pressure_atm * effective_broadening_fwhm[pressure_transition_index]
+    )
+    fwhm_scale = max(abs(measured_fwhm), 1.0e-10)
+    width_residual = np.array(
+        [(modeled_fwhm - measured_fwhm) / fwhm_scale],
+        dtype=float,
+    )
+
+    line_strength = line_strength_at_temperature(float(temperature_k), transition)
+    modeled_area = line_strength * pressure_atm * co_mole_fraction * optical_path_length_cm
+    area_scale = max(abs(float(integrated_area_cm_inv)), 1.0e-10)
+    area_residual = np.array(
+        [(modeled_area - float(integrated_area_cm_inv)) / area_scale],
+        dtype=float,
+    )
+
+    return np.concatenate([width_residual, area_residual])
 
 
 def _state_vector_from_estimate(state: StateEstimate) -> Array1D:
@@ -90,7 +248,11 @@ def pressure_line_consistency_half_width(
     per_line_pressure_atm: Array1D,
     nominal_pressure_atm: float,
 ) -> float:
-    """Return the largest line-to-line pressure deviation from the nominal value."""
+    """Return the largest informative line-to-line pressure deviation.
+
+    Any `NaN` entries are ignored. With the current strongest-line-only state
+    reduction this usually returns `NaN`, which the caller converts to zero.
+    """
 
     finite_pressure = np.asarray(per_line_pressure_atm, dtype=float)
     finite_pressure = finite_pressure[np.isfinite(finite_pressure)]
@@ -105,7 +267,13 @@ def corrected_pressure_from_broadening(
     apparent_pressure_atm: Array1D,
     broadening_scale: float = DEFAULT_PRESSURE_BROADENING_SCALE,
 ) -> Array1D:
-    """Return the reported pressure from the composition-based broadening model."""
+    """Return a legacy pressure rescaling helper.
+
+    The active state solve now applies the handout's `0.84` factor directly
+    inside the broadening coefficients, so the reported pressure should already
+    be on the corrected scale. This helper is retained only for backward
+    compatibility with older tests and exploratory scripts.
+    """
 
     pressure_atm = np.full_like(apparent_pressure_atm, np.nan, dtype=float)
     valid = np.isfinite(apparent_pressure_atm) & (apparent_pressure_atm > 0.0)
@@ -153,6 +321,7 @@ def solve_pressure_and_co_mole_fraction(
     integrated_area_cm_inv: float,
     *,
     optical_path_length_cm: float = DEFAULT_OPTICAL_PATH_LENGTH_CM,
+    broadening_scale: float = DEFAULT_PRESSURE_BROADENING_SCALE,
     transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
     transition: Transition = DEFAULT_CO_TRANSITIONS[0],
     composition_model: MixtureCompositionModel = DEFAULT_MIXTURE_COMPOSITION_MODEL,
@@ -166,6 +335,19 @@ def solve_pressure_and_co_mole_fraction(
 
     - `X_CO * gamma_CO(T)`
     - `(1 - X_CO) * gamma_bath(T)` with `gamma_bath == gamma_N2`
+
+    Pressure and CO mole fraction are solved simultaneously from:
+
+    - the strongest-transition collisional FWHM equation
+    - the strongest-transition integrated-area equation
+
+    The fit returns a Lorentz HWHM for each line because that is the parameter
+    expected by `scipy.special.voigt_profile`, but the state reduction converts
+    the fitted strongest-line width to FWHM and uses
+
+    `Delta nu_C = 2 P * 0.84 * sum X_i gamma_i(T)`
+
+    in the strongest-transition equation.
 
     The legacy background-composition arguments are retained for API
     compatibility but do not alter the active pressure solve.
@@ -191,76 +373,100 @@ def solve_pressure_and_co_mole_fraction(
             collision_partner_mole_fractions={"CO": float("nan"), BATH_GAS_REFERENCE_SPECIES: float("nan")},
         )
 
-    co_mole_fraction = float(np.clip(composition_model.default_co_mole_fraction, 0.0, 0.999))
+    pressure_transition_index = _pressure_transition_index(len(transitions))
 
-    for _ in range(max_iterations):
-        effective_broadening = np.asarray(
-            [
-                effective_bath_gas_broadening_coefficient_cm_inv_atm(
-                    transition_value.broadening_by_species,
-                    float(temperature_k),
-                    co_mole_fraction,
-                )
-                for transition_value in transitions
-            ],
-            dtype=float,
+    if pressure_transition_index is None:
+        nan_vector = np.full(len(transitions), np.nan, dtype=float)
+        return StateEstimate(
+            temperature_k=float(temperature_k),
+            pressure_atm=float("nan"),
+            co_mole_fraction=float("nan"),
+            per_line_pressure_atm=nan_vector,
+            effective_broadening_cm_inv_atm=nan_vector,
+            collision_partner_mole_fractions={"CO": float("nan"), BATH_GAS_REFERENCE_SPECIES: float("nan")},
         )
-        per_line_pressure = np.full(len(transitions), np.nan, dtype=float)
-        valid = np.isfinite(effective_broadening) & (effective_broadening > 0.0)
-        per_line_pressure[valid] = collisional_hwhm_cm_inv[valid] / effective_broadening[valid]
-        pressure_atm = float(np.nanmean(per_line_pressure))
 
-        if not np.isfinite(pressure_atm) or pressure_atm <= 0.0:
-            break
-
-        line_strength = line_strength_at_temperature(float(temperature_k), transition)
-        updated_co_mole_fraction = float(
+    co_mole_fraction_guess = float(
+        np.clip(composition_model.default_co_mole_fraction, 1.0e-8, 0.999)
+    )
+    effective_broadening_fwhm_guess = _effective_broadening_fwhm_vector(
+        float(temperature_k),
+        co_mole_fraction_guess,
+        transitions,
+        broadening_scale=broadening_scale,
+    )
+    strongest_fwhm = float(2.0 * collisional_hwhm_cm_inv[pressure_transition_index])
+    strongest_broadening_guess = float(
+        effective_broadening_fwhm_guess[pressure_transition_index]
+    )
+    pressure_guess = float(max(strongest_fwhm / strongest_broadening_guess, 1.0e-8))
+    line_strength = line_strength_at_temperature(float(temperature_k), transition)
+    if np.isfinite(pressure_guess) and pressure_guess > 0.0:
+        co_mole_fraction_guess = float(
             np.clip(
-                integrated_area_cm_inv / (pressure_atm * optical_path_length_cm * line_strength),
-                0.0,
+                integrated_area_cm_inv
+                / (pressure_guess * optical_path_length_cm * line_strength),
+                1.0e-8,
                 0.999,
             )
         )
+    pressure_guess = float(max(pressure_guess, 1.0e-8))
 
-        if abs(updated_co_mole_fraction - co_mole_fraction) < 1.0e-10:
-            co_mole_fraction = updated_co_mole_fraction
-            break
+    result = least_squares(
+        _state_residual_vector,
+        x0=np.array([pressure_guess, co_mole_fraction_guess], dtype=float),
+        bounds=(
+            np.array([1.0e-8, 1.0e-8], dtype=float),
+            np.array([1.0e3, 0.999], dtype=float),
+        ),
+        kwargs={
+            "temperature_k": float(temperature_k),
+            "collisional_hwhm_cm_inv": np.asarray(collisional_hwhm_cm_inv, dtype=float),
+            "integrated_area_cm_inv": float(integrated_area_cm_inv),
+            "optical_path_length_cm": float(optical_path_length_cm),
+            "transitions": transitions,
+            "transition": transition,
+            "pressure_transition_index": pressure_transition_index,
+            "broadening_scale": float(broadening_scale),
+        },
+        max_nfev=max(25, 5 * int(max_iterations)),
+    )
 
-        co_mole_fraction = updated_co_mole_fraction
+    pressure_atm = float(result.x[0]) if result.success else float("nan")
+    co_mole_fraction = float(result.x[1]) if result.success else float("nan")
 
     collision_partner_mole_fractions = {
         BATH_GAS_REFERENCE_SPECIES: max(1.0 - co_mole_fraction, 0.0),
         "CO": co_mole_fraction,
     }
-    effective_broadening = np.asarray(
-        [
-            effective_bath_gas_broadening_coefficient_cm_inv_atm(
-                transition_value.broadening_by_species,
-                float(temperature_k),
-                co_mole_fraction,
-            )
-            for transition_value in transitions
-        ],
-        dtype=float,
+    effective_broadening_hwhm = _effective_broadening_vector(
+        float(temperature_k),
+        co_mole_fraction,
+        transitions,
+        broadening_scale=broadening_scale,
+    )
+    effective_broadening_fwhm = _effective_broadening_fwhm_vector(
+        float(temperature_k),
+        co_mole_fraction,
+        transitions,
+        broadening_scale=broadening_scale,
     )
     per_line_pressure = np.full(len(transitions), np.nan, dtype=float)
-    valid = np.isfinite(effective_broadening) & (effective_broadening > 0.0)
-    per_line_pressure[valid] = collisional_hwhm_cm_inv[valid] / effective_broadening[valid]
-    pressure_atm = float(np.nanmean(per_line_pressure))
-    co_mole_fraction = _co_mole_fraction_from_pressure(
-        float(temperature_k),
-        float(pressure_atm),
-        float(integrated_area_cm_inv),
-        optical_path_length_cm=optical_path_length_cm,
-        transition=transition,
-    )
+    if (
+        np.isfinite(effective_broadening_fwhm[pressure_transition_index])
+        and effective_broadening_fwhm[pressure_transition_index] > 0.0
+    ):
+        per_line_pressure[pressure_transition_index] = (
+            2.0 * collisional_hwhm_cm_inv[pressure_transition_index]
+            / effective_broadening_fwhm[pressure_transition_index]
+        )
 
     return StateEstimate(
         temperature_k=float(temperature_k),
         pressure_atm=float(pressure_atm),
         co_mole_fraction=float(co_mole_fraction),
         per_line_pressure_atm=np.asarray(per_line_pressure, dtype=float),
-        effective_broadening_cm_inv_atm=np.asarray(effective_broadening, dtype=float),
+        effective_broadening_cm_inv_atm=np.asarray(effective_broadening_hwhm, dtype=float),
         collision_partner_mole_fractions=collision_partner_mole_fractions,
     )
 
@@ -281,15 +487,12 @@ def evaluate_state_from_fit_parameters(
         parameters.collisional_hwhm_cm_inv,
         parameters.line_areas[0],
         optical_path_length_cm=optical_path_length_cm,
+        broadening_scale=broadening_scale,
         transitions=transitions,
         transition=transition,
         composition_model=composition_model,
     )
-    reported_pressure = corrected_pressure_from_broadening(
-        np.array([state.pressure_atm], dtype=float),
-        broadening_scale=broadening_scale,
-    )[0]
-    return np.array([parameters.temperature_k, reported_pressure, state.co_mole_fraction], dtype=float)
+    return np.array([parameters.temperature_k, state.pressure_atm, state.co_mole_fraction], dtype=float)
 
 
 def build_state_history(
@@ -299,6 +502,7 @@ def build_state_history(
     *,
     sweep_frequency_hz: float,
     optical_path_length_cm: float = DEFAULT_OPTICAL_PATH_LENGTH_CM,
+    broadening_scale: float = DEFAULT_PRESSURE_BROADENING_SCALE,
     transition: Transition = DEFAULT_CO_TRANSITIONS[0],
     transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
     composition_model: MixtureCompositionModel = DEFAULT_MIXTURE_COMPOSITION_MODEL,
@@ -318,6 +522,7 @@ def build_state_history(
             np.asarray(width_value, dtype=float),
             float(area_value),
             optical_path_length_cm=optical_path_length_cm,
+            broadening_scale=broadening_scale,
             transitions=transitions,
             transition=transition,
             composition_model=composition_model,
@@ -512,7 +717,7 @@ def estimate_broadening_parameter_uncertainty(
         contributions.append(np.abs(perturbed_exponent_state - nominal_state))
 
     contribution_matrix = np.asarray(contributions, dtype=float)
-    half_width = np.sqrt(np.nansum(contribution_matrix**2, axis=0))
+    half_width = _root_sum_square(contribution_matrix)
     half_width[0] = 0.0
     return np.asarray(half_width, dtype=float)
 
@@ -631,7 +836,7 @@ def estimate_state_model_uncertainty(
     composition_model: MixtureCompositionModel = DEFAULT_MIXTURE_COMPOSITION_MODEL,
     include_broadening_parameters: bool = True,
     include_bath_gas_model: bool = False,
-    include_line_consistency: bool = True,
+    include_line_consistency: bool = False,
 ) -> Array1D:
     """Estimate non-fit state uncertainty from model parameters and mismatch."""
 
@@ -672,7 +877,7 @@ def estimate_state_model_uncertainty(
         return np.zeros(3, dtype=float)
 
     contribution_matrix = np.asarray(contributions, dtype=float)
-    return np.sqrt(np.nansum(contribution_matrix**2, axis=0))
+    return _root_sum_square(contribution_matrix)
 
 
 def estimate_broadening_model_uncertainty(
@@ -693,5 +898,5 @@ def estimate_broadening_model_uncertainty(
         composition_model=composition_model,
         include_broadening_parameters=True,
         include_bath_gas_model=False,
-        include_line_consistency=True,
+        include_line_consistency=False,
     )
