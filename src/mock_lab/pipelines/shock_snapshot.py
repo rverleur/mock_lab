@@ -40,10 +40,12 @@ Array2D = NDArray[np.float64]
 class ShockFrequencyDomainResult:
     """Shock traces expressed on a relative-wavenumber axis."""
 
+    display_time_axis_s: Array1D
     relative_wavenumber_cm_inv: Array1D
     corrected_baseline_sweep: Array1D
     scaled_signal_sweeps: Array2D
     absorbance_sweeps: Array2D
+    analysis_window: slice
     plot_sweep_index: int
 
 
@@ -170,9 +172,11 @@ def run_shock_snapshot_pipeline(
     plt.close(absorbance_frequency_figure)
 
     return ShockFrequencyDomainResult(
+        display_time_axis_s=display_time_axis_s,
         relative_wavenumber_cm_inv=relative_wavenumber_cm_inv,
         corrected_baseline_sweep=corrected_baseline_sweep,
         scaled_signal_sweeps=scaled_signal_sweeps,
         absorbance_sweeps=absorbance_sweeps,
+        analysis_window=analysis_window,
         plot_sweep_index=clamped_index,
     )

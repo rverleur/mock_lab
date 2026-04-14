@@ -197,133 +197,106 @@ These three transitions are a useful set because they fall within a single QCL s
 
 \subsection*{Signal Loading and Sweep Extraction}
 
-\begin{itemize}
-  \item Explain that the MAT files are loaded and converted into time histories using the recorded sampling interval.
-  \item Describe how each scan window is extracted so that it starts with a small portion of baseline, includes the laser ramp, and ends with a small amount of trailing baseline.
-  \item State that this choice slightly sacrifices edge data in exchange for consistent scan alignment.
-\end{itemize}
+Each MAT file contains a detector channel and a TTL-like reference channel from the function generator. The reference signal is thresholded to identify sweep boundaries, and the sample period is inferred from the known \SI{300}{kHz} modulation frequency. The continuous records are then split into individual sweeps on a common local time axis. A fixed phase offset of \SI{2.2}{\micro\second} is applied before the trace is reshaped so that the first incomplete sweep is discarded and each retained sweep begins with a short section of baseline, spans the useful laser ramp, and ends with a small amount of trailing baseline. This sacrifices a small amount of edge data, but it gives a consistent registration across the baseline, etalon, and shock datasets.
 
 \subsection*{Baseline Treatment and Absorbance Construction}
 
-\begin{itemize}
-  \item Explain that an average baseline sweep is formed from all baseline scans.
-  \item Describe the wing-based baseline correction: a line is fit through the first and last 32 samples of each sweep and subtracted so that low-frequency drift within one scan is reduced.
-  \item State that the shocked scan is scaled to the baseline peak before absorbance is formed.
-  \item Explain the plotting window used for absorbance: only the region where the corrected average baseline is between about \SI{1.0}{V} and \SI{2.75}{V} is retained.
-\end{itemize}
+The baseline sweeps are first registered as described above and then averaged to form a single reference sweep. Because the absorbance calculation assumes that the detector voltage is linear in optical intensity, Beer--Lambert absorbance can be evaluated directly from the voltage ratio,
+\[
+  A = -\ln\!\left(I/I_0\right),
+\]
+where $I_0$ is the baseline signal and $I$ is the shocked-gas transmission. Before this ratio is formed, a linear wing baseline is fit through the flat regions at the beginning and end of each sweep and subtracted. The same correction is applied to the average baseline sweep and to every shock sweep. This removes slow scan-to-scan intensity drift and any small broadband slope within a single sweep that would otherwise appear as artificial absorbance. After line correction, each shock sweep is scaled so that its peak matches the peak of the corrected average baseline. This makes the absorbance construction less sensitive to overall amplitude variation between scans while preserving the within-scan absorption features.
 
-\paragraph{Suggested figure.}
-Use the existing figure \path{results/figures/baseline_shock_overlay.png} to show the corrected baseline and shocked signals over one representative scan.
+Absorbance is evaluated only over the part of the ramp where the corrected average baseline lies between about \SI{1.0}{V} and \SI{2.75}{V}. The lower cutoff removes the low-signal beginning of the scan, where the transmission ratio is noisy and the signal-to-noise ratio is poor. The upper cutoff avoids the highest-voltage end of the ramp near the scan maximum, where the sweep is less useful for the present analysis. Samples with non-positive transmission ratios are excluded because Beer--Lambert absorbance is undefined there.
 
-\paragraph{Suggested figure.}
-Use the existing figure \path{results/figures/shock_absorbance_time.png} to show the absorbance signal before converting to frequency.
+A representative time-domain reduction is shown in Fig.~\ref{fig:shock-time}. The left panel compares the corrected average baseline with one corrected shock sweep. Outside the absorbing portions of the scan the two traces nearly coincide, while the departures between them mark the CO absorption features. The right panel shows the corresponding absorbance in the retained part of the sweep before conversion to frequency.
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/shock_time.png}
+  \caption{Representative time-domain reduction. Left: corrected average baseline and one corrected shock sweep. Right: absorbance computed from the retained time window of that sweep.}
+  \label{fig:shock-time}
+\end{figure}
 
 \subsection*{Etalon Calibration}
 
-\begin{itemize}
-  \item Explain that the etalon trace is used to map scan time to relative wavenumber.
-  \item State that the etalon data are averaged over scans, peak locations are identified, and a third-order polynomial is fit over the useful portion of the ramp.
-  \item Note that the present calibration is relative rather than an absolute frequency standard.
-\end{itemize}
+The etalon data are used to convert sweep time to relative wavenumber. Each etalon sweep is first baseline-corrected using its edge samples so that the fringe extrema can be identified cleanly. Fringe peaks are then detected on the registered scans, the peak locations are averaged by fringe order, and those averaged peak times are assigned equally spaced relative wavenumbers using the known germanium etalon free spectral range. The final time-to-wavenumber relation is represented by a quartic polynomial,
 
 \begin{equation}
-  \Delta\tilde{\nu}(t)=a_0+a_1 t+a_2 t^2+a_3 t^3
+  \Delta\tilde{\nu}(t)=a_0+a_1 t+a_2 t^2+a_3 t^3+a_4 t^4,
 \end{equation}
 
-\paragraph{Suggested figure.}
-Use the existing figures \path{results/figures/etalon_sweep.png} and \path{results/figures/etalon_calibration.png} as a two-panel figure.
+which is sufficient to capture the modest nonlinearity in the QCL frequency sweep. This calibration is relative rather than absolute: it defines a consistent wavenumber axis within the scan window, but it does not lock the spectrum to an external absolute frequency standard.
 
-\paragraph{Suggested figure.}
-Use the existing figure \path{results/figures/shock_absorbance_frequency.png} to show one representative absorbance spectrum on the calibrated frequency axis.
+The etalon calibration is shown in Fig.~\ref{fig:etalon-cal}. The left panel shows a representative corrected etalon sweep with the detected fringe peaks. The right panel shows the quartic time-to-wavenumber fit and its residuals. The residuals remain small compared with the etalon free spectral range, so the quartic is adequate over the useful scan interval.
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/etalon.png}
+  \caption{Etalon-based relative wavenumber calibration. Left: representative corrected etalon sweep with detected fringe peaks. Right: quartic time-to-wavenumber fit and peak residuals.}
+  \label{fig:etalon-cal}
+\end{figure}
+
+The absorbance spectrum on the calibrated frequency axis is shown together with the Voigt-profile fit in Fig.~\ref{fig:voigt-fit}, discussed in the next section.
 
 \section{Results and Discussion}
 
-\subsection*{Voigt-Fit Structure}
+\subsection*{Voigt-Fit and Data Extraction}
 
-\begin{itemize}
-  \item Explain that each scan is fit with a constrained sum of three Voigt profiles.
-  \item State clearly which quantities are free and which are constrained:
-  \begin{itemize}
-    \item a shared temperature through the Doppler contribution,
-    \item a dominant integrated-area parameter tied to the strongest transition,
-    \item constrained weaker-line areas based on temperature-dependent line-strength ratios,
-    \item limited line-center movement to preserve transition identity,
-    \item shared or linked collisional-width structure for the weaker transitions.
-  \end{itemize}
-  \item Explain why the constraints are necessary: without them, the optimizer can swap line identities when fitting partially overlapping peaks.
-\end{itemize}
+Each usable absorbance spectrum is fit with a constrained sum of three Voigt profiles using SciPy's Voigt-profile function and nonlinear least squares. The fit is not fully free. Instead, the optimizer works on an eight-parameter vector consisting of one shared temperature, the anchor line center for P(0,31), a small center adjustment for P(2,20) relative to its nominal offset from P(0,31), one collisional half-width for P(0,31), one shared collisional half-width for P(2,20) and P(3,14), one integrated area for P(0,31), and a linear baseline offset and slope. The explicit per-line centers, widths, and areas reported after the fit are reconstructed from this reduced parameterization.
 
-\begin{equation}
-  \int A_i(\tilde{\nu})\,d\tilde{\nu}=S_i(T)\,P\,X_{\mathrm{CO}}\,L
-\end{equation}
+The handout recommendations for stabilizing the fit were implemented directly. The weakest transition, P(3,14), is held at a fixed offset from the anchor line P(0,31), and P(3,14) is forced to share its collisional width with P(2,20). Additional constraints were added for the same reason. Only the strongest integrated area is fit freely; the areas of the weaker transitions are tied to it through the temperature-dependent line-strength ratios, so once the shared temperature is specified the weaker areas are no longer independent. A small linear baseline is also retained inside the spectral fit to absorb any residual broadband mismatch left after the time-domain baseline correction. These choices are mainly about stability: when all three lines are allowed to vary independently, the optimizer can swap line identities or trade area between overlapping features.
 
-\begin{itemize}
-  \item Explain that the reported temperature is taken directly from the Voigt-fit Doppler term.
-  \item State that pressure and CO mole fraction are then solved simultaneously with temperature held fixed, using only the strongest-transition collisional FWHM together with the strongest-line integrated-area equation.
-  \item Note that the weaker transitions still stabilize the spectral fit and improve the temperature estimate, but they are not used directly in the final pressure solve because one weak-line width is constrained during the fit.
-\end{itemize}
+The main purpose of the fit is to extract the quantities needed for the state solve in a stable way. Temperature is taken directly from the shared Doppler term. The fitted Lorentz half-width of the strongest transition, P(0,31), is converted to collisional FWHM and used in the pressure relation, while the integrated area of that same line is used in the absorbance-area relation. Pressure and CO mole fraction are then solved simultaneously from those two quantities with temperature held fixed. The weaker transitions are therefore still important, but mainly because they stabilize the spectral decomposition and improve the temperature estimate rather than because they enter the final pressure solve directly. To improve continuity sweep-to-sweep, the previous successful fit is used as the initial guess for the next spectrum, and spectra with peak absorbance below the minimum threshold are skipped.
 
-\paragraph{Suggested figure.}
-Use the existing figure \path{results/figures/shock_voigt_fit.png} to show the measured absorbance, total fit, and the individual Voigt contributions.
+A representative constrained fit is shown in Fig.~\ref{fig:voigt-fit}. The measured absorbance and total model agree very closely. The dotted vertical lines mark the fitted line centers. The dominant peak is anchored by P(0,31), the lower-wavenumber feature is dominated by P(2,20), and P(3,14) appears as a weaker shoulder on the high-wavenumber side of the main peak. The residual remains small compared with the peak absorbance, which indicates that the constrained model is capturing the spectrum without obvious line swapping or baseline distortion.
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=4 in]{figures/voigt_fit.png}
+  \caption{Representative constrained three-line Voigt-profile fit. The measured absorbance is shown together with the total fit, the individual transition contributions, fitted line-center markers, and the residual.}
+  \label{fig:voigt-fit}
+\end{figure}
 
 \subsection*{Recovered State Histories}
 
-\begin{itemize}
-  \item Present the recovered temperature, pressure, and CO mole-fraction histories as the main result of the report.
-  \item Discuss the broad trends over time and identify any early-time region where the fits are visibly less stable.
-  \item Comment on whether the temperature, pressure, and concentration histories are qualitatively consistent with the expected shocked-gas behavior.
-  \item If needed, separate the discussion into “physically credible window” and “less reliable early-time window.”
-\end{itemize}
+The recovered temperature, pressure, and CO mole-fraction histories are shown in Fig.~\ref{fig:state-history}. The first few points, up to about \SI{50}{\micro\second}, correspond to Region~2 of the shock tube: behind the incident shock but before arrival of the reflected shock. That interval is short, so the state is only weakly constrained by the available scans, but the recovered CO mole fraction near \num{0.02} is consistent with the initial driven-gas composition.
 
-\paragraph{Suggested figure.}
-Use the existing figure \path{results/figures/state_history.png} as the main results figure.
+At about \SI{50}{\micro\second}, the reflected shock reaches the test section and the recovered state moves into Region~5. The pressure jumps abruptly to nearly \SI{1}{atm}, and the temperature rises at the same time to about \SI{4000}{K}, matching the nominal target condition. The CO mole fraction increases more gradually, then levels off just below 4\%, which is broadly consistent with the initial mixture if most of the \ce{CO2} dissociates to \ce{CO} under the reflected-shock conditions.
+
+That Region~5 state remains approximately steady for about \SI{350}{\micro\second}. After that, the pressure rises while the temperature falls, and the recovered CO mole fraction also decreases. Based on the measured state history, that late-time behavior is consistent with both recombination toward \ce{CO2} and dilution by driver gas. Because this interpretation is based only on the laser-absorption data, the late-time evolution should still be treated more cautiously than the initial reflected-shock plateau.
+
+The uncertainty bands are included in Fig.~\ref{fig:state-history} to show where the recovered state is tightly or weakly constrained. They remain relatively narrow through much of the early and mid-time record and then widen toward the end as the spectra weaken and the fitted pressure becomes more sensitive to linewidth uncertainty. A full description of how those uncertainty bands were constructed is included in the next section.
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=4 in]{figures/state_history.png}
+  \caption{Recovered temperature, pressure, and CO mole-fraction histories. The shaded bands show the total 95\% uncertainty carried forward to the reported state variables; the uncertainty model itself is discussed in the next section.}
+  \label{fig:state-history}
+\end{figure}
 
 \section{Uncertainty}
 
 \subsection*{Fit and Spectroscopic Contributions}
 
-\begin{itemize}
-  \item Explain that two uncertainty sources are included: the local covariance returned by the nonlinear fit and a Monte Carlo treatment of uncertain spectroscopic inputs.
-  \item State that the Monte Carlo samples uniformly inside the bounds implied by the HiTEMP uncertainty codes, consistent with the NIST guidance used in the code.
-  \item Note that the full Monte Carlo reruns the Voigt fit for every trial rather than perturbing only the post-processed state calculation.
-  \item State that the broadening coefficients and exponents are varied by the adopted $\pm 5\%$ bounds, while the line positions and line strengths use the decoded HiTEMP bounds.
-\end{itemize}
+Two independent uncertainty sources were carried through the analysis. The first is local fit uncertainty from the constrained nonlinear least-squares problem. That contribution is estimated from the fit Jacobian, which gives a local covariance for the reduced fit parameters under the usual linearization of the model near the optimum. The covariance is then propagated through the parameter expansion and state-extraction steps to obtain uncertainty in temperature, pressure, and CO mole fraction.
 
-\begin{equation}
-  \sigma_{\mathrm{total}}^2 = \sigma_{\mathrm{fit}}^2 + \sigma_{\mathrm{spec}}^2
-\end{equation}
+The second source is uncertainty in the spectroscopic inputs. That contribution was treated with a full Monte Carlo refit of the data using jittered spectroscopic parameters. For each of 1000 trials, the sampled parameters were drawn uniformly within the bounds implied by the HiTEMP/HITRAN uncertainty data, consistent with NIST Technical Note 1297, and the full constrained Voigt-fit and state-solve workflow was repeated.
 
-\begin{itemize}
-  \item Explain that the pressure uncertainty should be discussed carefully because it depends on both the nominal fit covariance and the broadening-model perturbations sampled in the full-refit Monte Carlo.
-  \item State explicitly that the largest remaining model assumption is the treatment of all non-CO collisions as a nitrogen-equivalent bath gas.
-\end{itemize}
-
-\paragraph{Suggested figure.}
-Use the existing figure \path{results/figures/state_history_monte_carlo.png} to show the mean state histories and the uncertainty bands. If page count is tight, move this figure to the appendix and summarize the uncertainty in the main text.
+The two uncertainty sources were treated as linearly independent and combined by root-sum-square of their 95\% half-widths. The resulting total uncertainty is included in Fig.~\ref{fig:state-history}. In the Region~5 data, the combined uncertainty is dominated by the spectroscopic contribution, while at late time the weakening spectra make the fit uncertainty the larger term.
 
 \section{Conclusions}
 
-\begin{itemize}
-  \item Summarize the analysis chain in one sentence: raw scans were reduced to absorbance spectra, calibrated in frequency, fit with a constrained three-line model, and converted into time-resolved state estimates.
-  \item State what was learned from the recovered temperature, pressure, and CO mole-fraction histories.
-  \item Identify the dominant remaining limitations: relative frequency calibration, simplified bath-gas broadening treatment, and sensitivity of the weakest transition.
-  \item End with one or two specific improvements that would most strengthen the measurement if the experiment were repeated.
-\end{itemize}
+The provided scans were reduced to baseline-corrected absorbance spectra, calibrated on a relative frequency axis with the etalon, fit with a constrained three-line Voigt model, and converted into time-resolved estimates of temperature, pressure, and CO mole fraction. The recovered histories identify the expected sequence of shock-tube states: an early Region~2 interval before reflected-shock arrival, followed near \SI{50}{\micro\second} by a Region~5 state close to the target condition of \SI{\sim 4000}{K} and \SI{\sim 1}{atm}. The CO mole fraction rises more gradually than the thermodynamic variables and then levels off just below 4\%, which is broadly consistent with substantial \ce{CO2} dissociation under the reflected-shock condition.
+
+The main limitations are the modeling assumptions required to make the reduction stable from the available absorption data alone. Pressure extraction treats all non-CO collisions as a single nitrogen-equivalent bath gas and applies the suggested fixed 0.84 scaling factor, neither of which is a fully species-resolved reacting-mixture broadening model. The frequency calibration is relative rather than absolute, and the spectral fit also constrains the weakest transition by fixing its offset from the anchor line and forcing it to share a collisional width with the secondary line. Those choices are reasonable for stability, but they likely reduce absolute accuracy when the real line positions or broadening behavior depart from the constrained model.
+
+If the measurement were repeated, the two changes most likely to improve accuracy would be an absolute frequency reference and a better broadening model for the reacting mixture. Additional benefit would likely come from stronger independent constraint on the weak transitions, either through improved signal-to-noise or by selecting a scan window with better line separation.
 
 \section*{References}
 
 \begin{enumerate}
   \item G. C. Mathews, M. G. Blaisdell, A. I. Lemcherfi, C. D. Slabaugh, and C. S. Goldenstein, ``High-bandwidth absorption-spectroscopy measurements of temperature, pressure, CO, and H$_2$O in the annulus of a rotating detonation rocket engine,'' \textit{Applied Physics B}, 2021. doi:10.1007/s00340-021-07703-9.
 \end{enumerate}
-
-\appendix
-
-\section{Appendix}
-
-\begin{itemize}
-  \item Include any extended uncertainty discussion that does not fit in the main text.
-  \item Move secondary plots here if the main text becomes too figure-heavy.
-  \item Possible appendix items: table of transition parameters, additional fit snapshots, or Monte Carlo implementation details.
-\end{itemize}
 
 \end{document}

@@ -268,6 +268,8 @@ def run_voigt_fit_pipeline(
         selected_result.fitted_absorbance,
         selected_result.component_absorbance,
         component_labels=selected_result.labels,
+        component_centers_cm_inv=selected_result.parameters.line_centers_relative_cm_inv,
+        report_style=True,
     )
     save_figure(fit_figure, figure_output_dir / "shock_voigt_fit.png")
     plt.close(fit_figure)
