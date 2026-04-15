@@ -3,7 +3,6 @@
 from pathlib import Path
 import sys
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -21,6 +20,7 @@ from mock_lab.plotting.figures import (
     plot_voigt_fit,
     save_figure,
 )
+from mock_lab.plotting.mpl import plt
 from mock_lab.pipelines.shock_snapshot import run_shock_snapshot_pipeline
 from mock_lab.pipelines.voigt_fit import run_voigt_fit_pipeline
 
@@ -47,7 +47,7 @@ def main() -> None:
         raw_data=etalon_data,
         output_dir=etalon_output_dir,
         figure_output_dir=figure_dir,
-        plot_sweep_index = 60,
+        plot_sweep_index=60,
     )
     etalon_report_figure = plot_etalon_report_figure(
         etalon_result.fit.time_axis_s - etalon_result.fit.time_axis_s[0],
@@ -66,7 +66,7 @@ def main() -> None:
         etalon_dir=etalon_output_dir,
         output_dir=shock_output_dir,
         figure_output_dir=figure_dir,
-        plot_sweep_index = 60,
+        plot_sweep_index=60,
     )
     shock_report_figure = plot_shock_time_report_figure(
         shock_result.display_time_axis_s,
@@ -83,7 +83,7 @@ def main() -> None:
         output_dir=shock_output_dir,
         figure_output_dir=figure_dir,
         table_output_dir=REPO_ROOT / "results" / "tables",
-        plot_sweep_index = 60,
+        plot_sweep_index=60,
     )
     with np.load(shock_output_dir / "voigt_fit_results.npz") as voigt_data:
         selected_index = int(voigt_data["plot_sweep_index"])

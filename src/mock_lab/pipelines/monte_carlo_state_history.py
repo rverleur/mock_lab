@@ -9,24 +9,20 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 from numpy.lib.format import open_memmap
 from numpy.typing import NDArray
 
 from mock_lab.io.matlab_loader import DEFAULT_PHASE_START_S, DEFAULT_REFERENCE_FREQUENCY_HZ
 from mock_lab.plotting.figures import plot_state_history, save_figure
+from mock_lab.plotting.mpl import plt
 from mock_lab.spectroscopy.collisional_broadening import (
     BATH_GAS_REFERENCE_SPECIES,
-    COLLISION_PARTNERS,
-    DEFAULT_MIXTURE_COMPOSITION_MODEL,
     NON_CO_COLLISION_PARTNERS,
 )
 from mock_lab.spectroscopy.state_estimation import (
     DEFAULT_OPTICAL_PATH_LENGTH_CM,
-    StateHistory,
     build_state_history,
-    evaluate_state_from_fit_parameters,
 )
 from mock_lab.spectroscopy.voigt import (
     DEFAULT_CO_TRANSITIONS,
@@ -40,7 +36,6 @@ from mock_lab.spectroscopy.voigt import (
 Array1D = NDArray[np.float64]
 Array2D = NDArray[np.float64]
 Array3D = NDArray[np.float64]
-Bool2D = NDArray[np.bool_]
 
 MONTE_CARLO_VERSION = 8
 STATE_COMPONENTS = ("temperature_k", "pressure_atm", "co_mole_fraction")
@@ -248,7 +243,7 @@ def _trial_outputs_from_fit_results(
     *,
     transitions: tuple[Transition, ...],
     optical_path_length_cm: float,
-) -> tuple[Array2D, Array2D, NDArray[np.bool_]]:
+) -> Array2D:
     """Convert one trial's fit stack into nominal states.
 
     The Monte Carlo methodology uses the spread across independent trials as the
@@ -260,9 +255,6 @@ def _trial_outputs_from_fit_results(
     temperature_k = np.full(scan_count, np.nan, dtype=float)
     collisional_hwhm_cm_inv = np.full((scan_count, len(transitions)), np.nan, dtype=float)
     strongest_line_area_cm_inv = np.full(scan_count, np.nan, dtype=float)
-    fit_half_widths = np.full((scan_count, len(STATE_COMPONENTS)), np.nan, dtype=float)
-    success = np.zeros(scan_count, dtype=bool)
-
     for scan_index, result in enumerate(fit_results):
         if result is None:
             continue
@@ -270,8 +262,6 @@ def _trial_outputs_from_fit_results(
         temperature_k[scan_index] = result.parameters.temperature_k
         collisional_hwhm_cm_inv[scan_index] = result.parameters.collisional_hwhm_cm_inv
         strongest_line_area_cm_inv[scan_index] = result.parameters.line_areas[0]
-        fit_half_widths[scan_index] = np.nan
-        success[scan_index] = bool(result.success)
 
     state_history = build_state_history(
         temperature_k,
@@ -281,9 +271,8 @@ def _trial_outputs_from_fit_results(
         optical_path_length_cm=optical_path_length_cm,
         transition=transitions[0],
         transitions=transitions,
-        composition_model=DEFAULT_MIXTURE_COMPOSITION_MODEL,
     )
-    nominal_state = np.stack(
+    return np.stack(
         [
             state_history.temperature_k,
             state_history.pressure_atm,
@@ -291,7 +280,6 @@ def _trial_outputs_from_fit_results(
         ],
         axis=1,
     )
-    return nominal_state, fit_half_widths, success
 
 
 def _fit_trial(
@@ -302,7 +290,7 @@ def _fit_trial(
     confidence_level: float,
     optical_path_length_cm: float,
     minimum_peak_absorbance: float,
-) -> tuple[Array2D, Array2D, NDArray[np.bool_], Array2D]:
+) -> tuple[Array2D, Array2D]:
     """Run one full trial: sample transitions, refit all sweeps, and reduce state."""
 
     rng = np.random.default_rng(trial_seed)
@@ -314,22 +302,20 @@ def _fit_trial(
         minimum_peak_absorbance=minimum_peak_absorbance,
         confidence_level=confidence_level,
     )
-    nominal_state, fit_half_widths, success = _trial_outputs_from_fit_results(
+    nominal_state = _trial_outputs_from_fit_results(
         fit_results,
         transitions=sampled_transitions,
         optical_path_length_cm=optical_path_length_cm,
     )
     return (
         nominal_state,
-        fit_half_widths,
-        success,
         _transition_sample_vector(sampled_transitions),
     )
 
 
 def _compute_chunk_worker(
     specification: dict[str, object],
-) -> tuple[int, int, Array3D, Array3D, Bool2D, Array3D]:
+) -> tuple[int, int, Array3D, Array3D]:
     """Run a contiguous chunk of full MC trials in one worker."""
 
     start = int(specification["start"])
@@ -351,8 +337,6 @@ def _compute_chunk_worker(
         np.nan,
         dtype=float,
     )
-    fit_half_width_chunk = np.full_like(nominal_state_chunk, np.nan)
-    success_chunk = np.zeros((chunk_size, scan_count), dtype=bool)
     sampled_transition_chunk = np.full(
         (
             chunk_size,
@@ -366,8 +350,6 @@ def _compute_chunk_worker(
     for local_trial_index, trial_index in enumerate(range(start, stop)):
         (
             nominal_state_chunk[local_trial_index],
-            fit_half_width_chunk[local_trial_index],
-            success_chunk[local_trial_index],
             sampled_transition_chunk[local_trial_index],
         ) = _fit_trial(
             frequency_cm_inv=frequency_cm_inv,
@@ -382,8 +364,6 @@ def _compute_chunk_worker(
         start,
         stop,
         nominal_state_chunk,
-        fit_half_width_chunk,
-        success_chunk,
         sampled_transition_chunk,
     )
 
@@ -398,18 +378,6 @@ def _state_samples_path(output_dir: Path) -> Path:
     """Return the path to the per-trial nominal-state memmap."""
 
     return output_dir / "state_history_refit_trial_states.npy"
-
-
-def _fit_half_widths_path(output_dir: Path) -> Path:
-    """Return the path to the per-trial fit half-width memmap."""
-
-    return output_dir / "state_history_refit_trial_fit_half_widths.npy"
-
-
-def _success_path(output_dir: Path) -> Path:
-    """Return the path to the per-trial fit-success mask memmap."""
-
-    return output_dir / "state_history_refit_trial_success.npy"
 
 
 def _sampled_transition_path(output_dir: Path) -> Path:
@@ -474,28 +442,22 @@ def _load_or_create_storage(
     optical_path_length_cm: float,
     minimum_peak_absorbance: float,
     force: bool,
-) -> tuple[Array3D, Array3D, Bool2D, Array3D, dict[str, object]]:
+) -> tuple[Array3D, Array3D, dict[str, object]]:
     """Open or create all resumable MC refit memmaps plus metadata."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = _metadata_path(output_dir)
     state_samples_path = _state_samples_path(output_dir)
-    fit_half_widths_path = _fit_half_widths_path(output_dir)
-    success_path = _success_path(output_dir)
     sampled_transition_path = _sampled_transition_path(output_dir)
 
     if force:
         metadata_path.unlink(missing_ok=True)
         state_samples_path.unlink(missing_ok=True)
-        fit_half_widths_path.unlink(missing_ok=True)
-        success_path.unlink(missing_ok=True)
         sampled_transition_path.unlink(missing_ok=True)
 
     required_paths = (
         metadata_path,
         state_samples_path,
-        fit_half_widths_path,
-        success_path,
         sampled_transition_path,
     )
 
@@ -532,18 +494,6 @@ def _load_or_create_storage(
             dtype=float,
             shape=(trial_count, scan_count, len(STATE_COMPONENTS)),
         )
-        fit_half_widths = open_memmap(
-            fit_half_widths_path,
-            mode="r+",
-            dtype=float,
-            shape=(trial_count, scan_count, len(STATE_COMPONENTS)),
-        )
-        success = open_memmap(
-            success_path,
-            mode="r+",
-            dtype=np.bool_,
-            shape=(trial_count, scan_count),
-        )
         sampled_transitions = open_memmap(
             sampled_transition_path,
             mode="r+",
@@ -554,7 +504,7 @@ def _load_or_create_storage(
                 len(SAMPLED_TRANSITION_PARAMETER_NAMES),
             ),
         )
-        return state_samples, fit_half_widths, success, sampled_transitions, metadata
+        return state_samples, sampled_transitions, metadata
 
     metadata = _initial_metadata(
         trial_count=trial_count,
@@ -570,18 +520,6 @@ def _load_or_create_storage(
         dtype=float,
         shape=(trial_count, scan_count, len(STATE_COMPONENTS)),
     )
-    fit_half_widths = open_memmap(
-        fit_half_widths_path,
-        mode="w+",
-        dtype=float,
-        shape=(trial_count, scan_count, len(STATE_COMPONENTS)),
-    )
-    success = open_memmap(
-        success_path,
-        mode="w+",
-        dtype=np.bool_,
-        shape=(trial_count, scan_count),
-    )
     sampled_transitions = open_memmap(
         sampled_transition_path,
         mode="w+",
@@ -593,40 +531,28 @@ def _load_or_create_storage(
         ),
     )
     state_samples[:] = np.nan
-    fit_half_widths[:] = np.nan
-    success[:] = False
     sampled_transitions[:] = np.nan
     state_samples.flush()
-    fit_half_widths.flush()
-    success.flush()
     sampled_transitions.flush()
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    return state_samples, fit_half_widths, success, sampled_transitions, metadata
+    return state_samples, sampled_transitions, metadata
 
 
 def _write_trial_chunk(
     state_samples: Array3D,
-    fit_half_widths: Array3D,
-    success: Bool2D,
     sampled_transitions: Array3D,
     metadata: dict[str, object],
     metadata_path: Path,
     start: int,
     stop: int,
     nominal_state_chunk: Array3D,
-    fit_half_width_chunk: Array3D,
-    success_chunk: Bool2D,
     sampled_transition_chunk: Array3D,
 ) -> int:
     """Write one complete trial chunk and checkpoint the completed count."""
 
     state_samples[start:stop] = nominal_state_chunk
-    fit_half_widths[start:stop] = fit_half_width_chunk
-    success[start:stop] = success_chunk
     sampled_transitions[start:stop] = sampled_transition_chunk
     state_samples.flush()
-    fit_half_widths.flush()
-    success.flush()
     sampled_transitions.flush()
     metadata["completed_trials"] = int(stop)
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -635,7 +561,6 @@ def _write_trial_chunk(
 
 def summarize_monte_carlo_samples(
     state_samples: Array3D,
-    fit_half_widths: Array3D,
     state_history_data: Path | str,
     output_dir: Path | str,
     *,
@@ -888,8 +813,6 @@ def run_monte_carlo_state_history_pipeline(
 
     (
         state_samples,
-        fit_half_widths,
-        success,
         sampled_transitions,
         metadata,
     ) = _load_or_create_storage(
@@ -922,8 +845,6 @@ def run_monte_carlo_state_history_pipeline(
         for chunk_result in map(_compute_chunk_worker, chunk_specs):
             completed_trials = _write_trial_chunk(
                 state_samples,
-                fit_half_widths,
-                success,
                 sampled_transitions,
                 metadata,
                 metadata_path,
@@ -935,8 +856,6 @@ def run_monte_carlo_state_history_pipeline(
                 for chunk_result in executor.map(_compute_chunk_worker, chunk_specs):
                     completed_trials = _write_trial_chunk(
                         state_samples,
-                        fit_half_widths,
-                        success,
                         sampled_transitions,
                         metadata,
                         metadata_path,
@@ -957,8 +876,6 @@ def run_monte_carlo_state_history_pipeline(
             for chunk_result in map(_compute_chunk_worker, remaining_specs):
                 completed_trials = _write_trial_chunk(
                     state_samples,
-                    fit_half_widths,
-                    success,
                     sampled_transitions,
                     metadata,
                     metadata_path,
@@ -966,10 +883,8 @@ def run_monte_carlo_state_history_pipeline(
                 )
 
     completed_state_samples = np.asarray(state_samples[:completed_trials], dtype=float)
-    completed_fit_half_widths = np.asarray(fit_half_widths[:completed_trials], dtype=float)
     result = summarize_monte_carlo_samples(
         completed_state_samples,
-        completed_fit_half_widths,
         state_history_data,
         output_dir,
         confidence_level=confidence_level,

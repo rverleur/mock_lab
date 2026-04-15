@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
+from mock_lab.plotting.mpl import plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from numpy.typing import NDArray
-
 
 Array1D = NDArray[np.float64]
 

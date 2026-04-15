@@ -8,11 +8,11 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 
 from mock_lab.plotting.figures import plot_voigt_fit, save_figure
+from mock_lab.plotting.mpl import plt
 from mock_lab.spectroscopy.voigt import (
     DEFAULT_CO_TRANSITIONS,
     VoigtFitParameters,

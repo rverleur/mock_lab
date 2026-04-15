@@ -1,10 +1,15 @@
 import csv
+from pathlib import Path
 
 import numpy as np
 
-from mock_lab.spectroscopy.hitemp import parse_hitemp_par_line, write_hitemp_par_csv
+from mock_lab.spectroscopy.hitemp import (
+    DEFAULT_HITEMP_SELECTED_TRANSITIONS_CSV_PATH,
+    parse_hitemp_par_line,
+    write_hitemp_par_csv,
+)
 from mock_lab.spectroscopy.hitemp import uncertainty_estimate_from_code
-from mock_lab.spectroscopy.voigt import DEFAULT_CO_TRANSITIONS
+from mock_lab.spectroscopy.voigt import DEFAULT_CO_TRANSITIONS, load_default_co_transitions
 
 
 SAMPLE_RECORD = (
@@ -106,3 +111,22 @@ def test_default_transitions_are_loaded_from_selected_hitemp_rows() -> None:
 
     assert rows_by_label["P(3,14)"].source_csv_row == 109058
     assert np.isclose(rows_by_label["P(3,14)"].center_cm_inv, 2008.551943)
+
+
+def test_load_default_transitions_works_with_curated_csv_only(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "mock_lab.spectroscopy.voigt.DEFAULT_HITEMP_SELECTED_TRANSITIONS_CSV_PATH",
+        DEFAULT_HITEMP_SELECTED_TRANSITIONS_CSV_PATH,
+    )
+    monkeypatch.setattr(
+        "mock_lab.spectroscopy.voigt.DEFAULT_HITEMP_CO_PAR_PATH",
+        Path("/tmp/does-not-exist.par"),
+    )
+
+    transitions = load_default_co_transitions()
+
+    assert [transition.label for transition in transitions] == [
+        "P(0,31)",
+        "P(2,20)",
+        "P(3,14)",
+    ]

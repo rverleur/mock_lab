@@ -5,25 +5,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 
 from mock_lab.io.matlab_loader import load_mat_trace, split_trace
+from mock_lab.pipelines.baseline import load_baseline_products, run_baseline_pipeline
 from mock_lab.plotting.figures import (
     plot_frequency_domain_sweep,
     plot_single_sweep,
     plot_time_overlay,
     save_figure,
 )
+from mock_lab.plotting.mpl import plt
 from mock_lab.spectroscopy.absorbance import (
-    average_sweeps,
     beer_lambert_absorbance,
     find_analysis_window,
-    fit_edge_line,
     fit_edge_lines,
     scale_sweeps_to_reference_peak,
-    subtract_edge_line,
     subtract_edge_lines,
 )
 from mock_lab.spectroscopy.etalon_calibration import (
@@ -71,25 +69,26 @@ def run_shock_snapshot_pipeline(
     baseline_dir = Path(baseline_dir)
     etalon_dir = Path(etalon_dir)
     output_dir = Path(output_dir)
-    baseline_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     figure_output_dir = output_dir if figure_output_dir is None else Path(figure_output_dir)
     figure_output_dir.mkdir(parents=True, exist_ok=True)
 
     calibration = load_etalon_fit(etalon_dir / "etalon_fit.npz")
-
-    baseline_trace = load_mat_trace(raw_data.with_name("MockLabData_Baseline.mat"))
-    baseline_sweeps = split_trace(baseline_trace)
-    average_baseline_sweep = average_sweeps(baseline_sweeps.signal)
-    baseline_line = fit_edge_line(average_baseline_sweep, edge_samples=32)
-    corrected_baseline_sweep = subtract_edge_line(average_baseline_sweep, edge_samples=32)
+    baseline_output_path = baseline_dir / "baseline_average.npz"
+    if baseline_output_path.is_file():
+        baseline_result = load_baseline_products(baseline_output_path)
+    else:
+        baseline_result = run_baseline_pipeline(
+            raw_data=raw_data.with_name("MockLabData_Baseline.mat"),
+            output_dir=baseline_dir,
+        )
 
     trace = load_mat_trace(raw_data)
     sweeps = split_trace(trace)
     shock_lines = fit_edge_lines(sweeps.signal, edge_samples=32)
     corrected_signal_sweeps = subtract_edge_lines(sweeps.signal, edge_samples=32)
     scaled_signal_sweeps, scale_factors = scale_sweeps_to_reference_peak(
-        corrected_baseline_sweep,
+        baseline_result.corrected_baseline_sweep,
         corrected_signal_sweeps,
     )
     display_time_axis_s = sweeps.time_axis_s - sweeps.time_axis_s[0]
@@ -101,7 +100,7 @@ def run_shock_snapshot_pipeline(
     clamped_index = int(np.clip(plot_sweep_index, 0, sweeps.signal.shape[0] - 1))
     absorbance_sweeps = np.full_like(scaled_signal_sweeps, np.nan)
     analysis_window = find_analysis_window(
-        corrected_baseline_sweep,
+        baseline_result.corrected_baseline_sweep,
         start_index=32,
         minimum_reference_signal=1.0,
         maximum_reference_signal=2.75,
@@ -109,27 +108,19 @@ def run_shock_snapshot_pipeline(
 
     for sweep_index, scaled_sweep in enumerate(scaled_signal_sweeps):
         absorbance_sweeps[sweep_index, analysis_window] = beer_lambert_absorbance(
-            corrected_baseline_sweep[analysis_window],
+            baseline_result.corrected_baseline_sweep[analysis_window],
             scaled_sweep[analysis_window],
         )
 
     selected_absorbance = absorbance_sweeps[clamped_index, analysis_window]
 
     np.savez(
-        baseline_dir / "baseline_average.npz",
-        time_axis_s=baseline_sweeps.time_axis_s,
-        average_baseline_sweep=average_baseline_sweep,
-        baseline_line=baseline_line,
-        corrected_baseline_sweep=corrected_baseline_sweep,
-    )
-
-    np.savez(
         output_dir / "shock_frequency_domain.npz",
         time_axis_s=sweeps.time_axis_s,
         relative_wavenumber_cm_inv=relative_wavenumber_cm_inv,
-        average_baseline_sweep=average_baseline_sweep,
-        baseline_line=baseline_line,
-        corrected_baseline_sweep=corrected_baseline_sweep,
+        average_baseline_sweep=baseline_result.average_baseline_sweep,
+        baseline_line=baseline_result.baseline_line,
+        corrected_baseline_sweep=baseline_result.corrected_baseline_sweep,
         shock_lines=shock_lines,
         corrected_signal_sweeps=corrected_signal_sweeps,
         scaled_signal_sweeps=scaled_signal_sweeps,
@@ -141,7 +132,7 @@ def run_shock_snapshot_pipeline(
 
     overlay_figure = plot_time_overlay(
         display_time_axis_s,
-        corrected_baseline_sweep,
+        baseline_result.corrected_baseline_sweep,
         scaled_signal_sweeps[clamped_index],
         first_label="Average baseline",
         second_label="Shock sweep",
@@ -174,7 +165,7 @@ def run_shock_snapshot_pipeline(
     return ShockFrequencyDomainResult(
         display_time_axis_s=display_time_axis_s,
         relative_wavenumber_cm_inv=relative_wavenumber_cm_inv,
-        corrected_baseline_sweep=corrected_baseline_sweep,
+        corrected_baseline_sweep=baseline_result.corrected_baseline_sweep,
         scaled_signal_sweeps=scaled_signal_sweeps,
         absorbance_sweeps=absorbance_sweeps,
         analysis_window=analysis_window,

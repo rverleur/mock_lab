@@ -9,6 +9,7 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+.idea/
 
 # macOS
 .DS_Store
@@ -32,8 +33,12 @@ results/**
 # Large local media
 assets/videos/*.mov
 
-# Large third party datasets
-third_party/
+# Third-party assets
+third_party/HiTEMP/05_HITEMP2019.par
+third_party/HiTEMP/05_HITEMP2019.csv
+third_party/hitran_tips/__pycache__/
+third_party/**/*.py[cod]
+third_party/**/.DS_Store
 
 # LaTeX build artifacts
 report/*.aux

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 
@@ -15,6 +14,7 @@ from mock_lab.plotting.figures import (
     plot_single_sweep,
     save_figure,
 )
+from mock_lab.plotting.mpl import plt
 from mock_lab.spectroscopy.etalon_calibration import (
     EtalonFit,
     build_representative_sweep,

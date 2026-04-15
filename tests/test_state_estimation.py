@@ -7,7 +7,6 @@ from mock_lab.spectroscopy.state_estimation import (
     DEFAULT_OPTICAL_PATH_LENGTH_CM,
     DEFAULT_PRESSURE_BROADENING_SCALE,
     build_state_history,
-    corrected_pressure_from_broadening,
     estimate_co_mole_fraction,
     estimate_line_consistency_uncertainty,
     estimate_state_model_uncertainty,
@@ -18,17 +17,6 @@ from mock_lab.spectroscopy.voigt import (
     VoigtFitParameters,
     line_strength_at_temperature,
 )
-
-
-def test_corrected_pressure_applies_handout_scale() -> None:
-    apparent_pressure = np.array([1.0, 2.0, np.nan])
-    corrected_pressure = corrected_pressure_from_broadening(apparent_pressure)
-
-    assert np.allclose(
-        corrected_pressure[:2],
-        apparent_pressure[:2] / DEFAULT_PRESSURE_BROADENING_SCALE,
-    )
-    assert np.isnan(corrected_pressure[2])
 
 
 def test_estimate_co_mole_fraction_matches_pressure_normalized_area_relation() -> None:

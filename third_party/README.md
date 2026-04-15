@@ -1,10 +1,15 @@
 # Third-Party Resources
 
-This directory holds vendored external reference assets that are used by the analysis code but are not part of the experimental lab datasets.
+This directory holds vendored external reference assets used by the analysis code.
 
 Current contents:
 
-- `hitran_tips/`: local HITRAN TIPS partition-sum script and lookup tables used by `src/mock_lab/spectroscopy/tips.py`
-- `HiTEMP/`: local CO HiTEMP line-list source used by `src/mock_lab/spectroscopy/hitemp.py` and `src/mock_lab/spectroscopy/voigt.py`
+- `hitran_tips/`: local HITRAN TIPS lookup tables used by `src/mock_lab/spectroscopy/tips.py`.
+- `HiTEMP/mock_lab_co_transitions.csv`: the curated three-transition export used by the runtime code.
 
-These files are kept here instead of under `data/` so the `data/` tree can stay focused on raw experimental inputs plus generated analysis products.
+Optional larger local assets can also live here when you need to regenerate the curated transition file:
+
+- `HiTEMP/05_HITEMP2019.par`
+- `HiTEMP/05_HITEMP2019.csv`
+
+These resources are kept out of `data/` so that the `data/` tree stays focused on experimental inputs and generated products.

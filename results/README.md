@@ -1,9 +1,11 @@
 # Results
 
-Use this folder for report-ready outputs that you want to inspect directly:
+Use this folder for report-ready outputs and post-processing products:
 
 - `figures/` for final plots
 - `tables/` for final tables
-- `reports/` for report drafts or exported appendices
+- `reports/` for generated summaries and report-support files
+- `monte_carlo/` for resumable uncertainty studies
+- `videos/` for rendered diagnostic videos
 
-These folders are ignored in git except for `.gitkeep` placeholders.
+The generated subdirectories are ignored in git except for their keepfiles and this README.

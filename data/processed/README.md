@@ -1,10 +1,8 @@
 # Processed Data
 
-Store final machine-readable outputs here, for example:
+Machine-readable pipeline exports live here, for example:
 
-- fitted state histories
-- exported tables used in the report
-- serialized fit results
-- summary files consumed by plotting/reporting code
+- `exports/shock_frequency_domain.npz`
+- `exports/voigt_fit_results.npz`
 
-These folders are ignored in git except for `.gitkeep` placeholders.
+The generated stage directories are ignored in git except for their keepfiles and this README.

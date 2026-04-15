@@ -8,6 +8,20 @@ version = "0.1.0"
 description = "Python-first workspace for the ME 617 mock shock-tube lab"
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+notebooks = [
+    "ipykernel",
+    "jupyter",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

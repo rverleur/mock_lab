@@ -26,9 +26,11 @@ from mock_lab.spectroscopy.collisional_broadening import (
 )
 from mock_lab.spectroscopy.hitemp import (
     DEFAULT_HITEMP_CO_PAR_PATH,
+    DEFAULT_HITEMP_SELECTED_TRANSITIONS_CSV_PATH,
     UncertaintyEstimate,
     par_line_number_from_csv_row,
     read_hitemp_records_by_csv_row,
+    read_selected_transition_records,
     split_reference_indices,
     uncertainty_estimates_for_record,
 )
@@ -241,12 +243,27 @@ def transition_from_hitemp_record(
 
 
 def load_default_co_transitions() -> tuple[Transition, ...]:
-    """Load the three mock-lab CO transitions from the local HiTEMP line list."""
+    """Load the three mock-lab CO transitions from local curated data.
 
-    records_by_csv_row = read_hitemp_records_by_csv_row(
-        {csv_row for _, csv_row in HITEMP_CO_TRANSITION_CSV_ROWS},
-        par_path=DEFAULT_HITEMP_CO_PAR_PATH,
-    )
+    The curated CSV is the preferred runtime source because it keeps the
+    project self-contained. If it is unavailable, the loader falls back to the
+    full HiTEMP `.par` file when that larger local asset is present.
+    """
+
+    requested_rows = {csv_row for _, csv_row in HITEMP_CO_TRANSITION_CSV_ROWS}
+    selected_csv_path = DEFAULT_HITEMP_SELECTED_TRANSITIONS_CSV_PATH
+
+    if selected_csv_path.is_file():
+        records_by_csv_row = read_selected_transition_records(
+            requested_rows,
+            csv_path=selected_csv_path,
+        )
+    else:
+        records_by_csv_row = read_hitemp_records_by_csv_row(
+            requested_rows,
+            par_path=DEFAULT_HITEMP_CO_PAR_PATH,
+        )
+
     return tuple(
         transition_from_hitemp_record(
             label,
@@ -735,15 +752,6 @@ def _vector_to_parameters(
         baseline_offset=float(parameter_vector[-2]),
         baseline_slope=float(parameter_vector[-1]),
     )
-
-
-def pack_constrained_parameters(
-    parameters: VoigtFitParameters,
-    transitions: tuple[Transition, ...] = DEFAULT_CO_TRANSITIONS,
-) -> Array1D:
-    """Return the constrained optimizer vector for one explicit fit result."""
-
-    return _parameters_to_vector(parameters, transitions=transitions)
 
 
 def expand_constrained_parameters(

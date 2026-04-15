@@ -1,5 +1,5 @@
 # Examples
 
-Reference implementations and legacy snippets live here.
+Reference implementations and translation aids live here.
 
-For this project, the MATLAB Voigt-fitting demo is preserved as a translation reference only. The actual working analysis should be implemented in Python under `src/mock_lab/`.
+For this project, `examples/matlab_voigt_demo/` is preserved as a comparison point only. The active reduction lives under `src/mock_lab/`.

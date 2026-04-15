@@ -1,12 +1,18 @@
 # Tests
 
-Add unit and integration tests here as the Python modules stabilize.
+This suite covers the active analysis path:
 
-Good early targets:
+- MAT loading and sweep alignment
+- absorbance preprocessing helpers
+- HiTEMP parsing and curated transition loading
+- TIPS and line-strength calculations
+- Voigt fitting
+- state estimation and uncertainty helpers
+- Monte Carlo transition sampling
+- baseline and full-pipeline smoke runs
 
-- MAT loading
-- etalon peak selection
-- frequency-axis calibration
-- absorbance conversion
-- Voigt-profile fitting
-- pipeline smoke tests on trimmed sample inputs
+Run everything with:
+
+```bash
+.venv/bin/python -m pytest -q
+```

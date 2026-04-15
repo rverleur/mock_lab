@@ -1,10 +1,8 @@
 # Interim Data
 
-Store reusable intermediate products here, such as:
+Reusable stage outputs live here, such as:
 
-- aligned baseline channels
-- etalon peak picks
-- time-to-frequency calibration coefficients
-- baseline-corrected shock transmission windows
+- `baseline/baseline_average.npz`
+- `etalon/etalon_fit.npz`
 
-These folders are ignored in git except for `.gitkeep` placeholders.
+The stage directories are ignored in git except for their keepfiles and this README.

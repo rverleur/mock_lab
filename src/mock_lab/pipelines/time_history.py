@@ -6,12 +6,12 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 
 from mock_lab.io.matlab_loader import DEFAULT_PHASE_START_S, DEFAULT_REFERENCE_FREQUENCY_HZ
 from mock_lab.plotting.figures import plot_state_history, save_figure
+from mock_lab.plotting.mpl import plt
 from mock_lab.spectroscopy.state_estimation import (
     DEFAULT_OPTICAL_PATH_LENGTH_CM,
     StateHistory,
@@ -97,8 +97,6 @@ def _state_confidence_intervals(
     reduced_parameter_covariance: NDArray[np.float64],
     success: NDArray[np.bool_],
     state_history: StateHistory,
-    collisional_hwhm_cm_inv: NDArray[np.float64],
-    strongest_line_area_cm_inv: NDArray[np.float64],
     *,
     confidence_scale: float,
     optical_path_length_cm: float,
@@ -224,8 +222,6 @@ def run_time_history_pipeline(
         reduced_parameter_covariance,
         success,
         state_history,
-        collisional_hwhm_cm_inv,
-        strongest_line_area_cm_inv,
         confidence_scale=confidence_scale,
         optical_path_length_cm=optical_path_length_cm,
     )

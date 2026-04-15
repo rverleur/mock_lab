@@ -13,6 +13,9 @@ from typing import Any
 PAR_RECORD_LENGTH = 160
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_HITEMP_CO_PAR_PATH = REPO_ROOT / "third_party" / "HiTEMP" / "05_HITEMP2019.par"
+DEFAULT_HITEMP_SELECTED_TRANSITIONS_CSV_PATH = (
+    REPO_ROOT / "third_party" / "HiTEMP" / "mock_lab_co_transitions.csv"
+)
 
 ABSOLUTE_UNCERTAINTY_UPPER_BOUND: dict[int, float] = {
     0: nan,
@@ -222,6 +225,64 @@ def read_hitemp_records_by_csv_row(
         csv_row_number: records_by_par_line[par_line_number]
         for csv_row_number, par_line_number in par_rows_by_csv_row.items()
     }
+
+
+def read_selected_transition_records(
+    csv_row_numbers: set[int],
+    *,
+    csv_path: Path = DEFAULT_HITEMP_SELECTED_TRANSITIONS_CSV_PATH,
+) -> dict[int, dict[str, Any]]:
+    """Return curated transition rows keyed by their original HiTEMP CSV row number."""
+
+    if not csv_row_numbers:
+        return {}
+
+    requested_rows = {int(row_number) for row_number in csv_row_numbers}
+    selected_records: dict[int, dict[str, Any]] = {}
+
+    with csv_path.open("r", encoding="utf-8", newline="") as csv_file:
+        reader = csv.DictReader(csv_file)
+        for row in reader:
+            source_csv_row = int(row["source_csv_row"])
+            if source_csv_row not in requested_rows:
+                continue
+            selected_records[source_csv_row] = {
+                "molecule_id": int(row["molecule_id"]),
+                "isotopologue_id": int(row["isotopologue_id"]),
+                "wavenumber_cm_inv": float(row["wavenumber_cm_inv"]),
+                "line_strength_hitran": float(row["line_strength_hitran_ref"]),
+                "einstein_a_s_inv": float(row["einstein_a_s_inv"]),
+                "air_broadened_hwhm_cm_inv_atm": float(
+                    row["air_broadened_hwhm_cm_inv_atm"]
+                ),
+                "self_broadened_hwhm_cm_inv_atm": float(
+                    row["self_broadened_hwhm_cm_inv_atm"]
+                ),
+                "lower_state_energy_cm_inv": float(row["lower_state_energy_cm_inv"]),
+                "temperature_dependence_air": float(row["temperature_dependence_air"]),
+                "pressure_shift_air_cm_inv_atm": float(
+                    row["pressure_shift_air_cm_inv_atm"]
+                ),
+                "upper_global_quanta": row["upper_global_quanta"],
+                "lower_global_quanta": row["lower_global_quanta"],
+                "upper_local_quanta": row["upper_local_quanta"],
+                "lower_local_quanta": row["lower_local_quanta"],
+                "uncertainty_indices": row["uncertainty_indices"],
+                "reference_indices": row["reference_indices"],
+                "line_mixing_flag": row["line_mixing_flag"],
+                "upper_statistical_weight": float(row["upper_statistical_weight"]),
+                "lower_statistical_weight": float(row["lower_statistical_weight"]),
+            }
+
+    missing_rows = requested_rows - set(selected_records)
+    if missing_rows:
+        missing = ", ".join(str(row_number) for row_number in sorted(missing_rows))
+        raise ValueError(
+            "Could not find requested curated HiTEMP transition row(s): "
+            f"{missing}."
+        )
+
+    return selected_records
 
 
 def split_uncertainty_indices(uncertainty_indices: str) -> tuple[int, ...]:
