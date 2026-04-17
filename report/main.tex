@@ -52,7 +52,7 @@
 
 \section{Introduction and Objectives}
 
-This report applies scanned-wavelength absorption spectroscopy to recover temperature, pressure, and CO mole fraction from a set of CO absorption features near \SI{2008.5}{\per\centi\meter} in a shock-tube experiment.\footnote{Public code archive: \url{https://github.com/placeholder/mock-lab-report}.} The dataset includes a baseline scan that defines the unabsorbed transmission, an etalon scan that provides the frequency calibration, and repeated shock-tube scans containing the absorption spectra of interest. The reduction converts detector voltage to absorbance for each sweep, fits the resulting spectrum with a constrained three-line Voigt model, and reconstructs the gas state as a function of time with propagated uncertainty.
+This report applies scanned-wavelength absorption spectroscopy to recover temperature, pressure, and CO mole fraction from a set of CO absorption features near \SI{2008.5}{\per\centi\meter} in a shock-tube experiment.\footnote{Public code archive: \url{https://github.com/rverleur/mock_lab}.} The dataset includes a baseline scan that defines the unabsorbed transmission, an etalon scan that provides the frequency calibration, and repeated shock-tube scans containing the absorption spectra of interest. The reduction converts detector voltage to absorbance for each sweep, fits the resulting spectrum with a constrained three-line Voigt model, and reconstructs the gas state as a function of time with propagated uncertainty.
 
 \section{Theory}
 
@@ -267,7 +267,7 @@ The provided scans were reduced to baseline-corrected absorbance spectra, calibr
 
 The main limitations are the modeling assumptions required to make the reduction stable from the absorption data alone. Pressure extraction treats all non-CO collisions as a single nitrogen-equivalent bath gas and applies the adopted 0.84 scaling factor, neither of which yields a fully species-resolved reacting-mixture broadening model. The calibration is relative rather than absolute, and the spectral fit constrains the weakest transition by fixing its offset from the anchor line and forcing it to share a collisional width with the secondary line. Those choices improve stability but likely reduce absolute accuracy when the real line positions or broadening behavior depart from the model.
 
-If the measurement were repeated, the clearest improvements would be an absolute frequency reference and a better broadening model for the reacting mixture. Additional benefit would likely come from stronger independent constraints on the weak transitions, either through improved signal-to-noise ratio or a scan window with better line separation. A public repository for the reduction code and plotting scripts is available at \url{https://github.com/placeholder/mock-lab-report}.
+If the measurement were repeated, the clearest improvements would be an absolute frequency reference and a better broadening model for the reacting mixture. Additional benefit would likely come from stronger independent constraints on the weak transitions, either through improved signal-to-noise ratio or a scan window with better line separation. A public repository for the reduction code and plotting scripts is available at \url{https://github.com/rverleur/mock_lab}.
 
 \bibliographystyle{unsrt}
 \bibliography{references}
