@@ -22,7 +22,7 @@ This repository is the working Python reduction for the scanned-wavelength direc
 
 ## Deeper Package Guides
 
-The top-level README stays intentionally short. The implementation notes that explain how each reduction step works now live alongside the code:
+This top-level README is intentionally short. The implementation notes that explain how each reduction step works live alongside the code:
 
 - [`src/mock_lab/README.md`](src/mock_lab/README.md): package-level map, stage handoff files, and where to edit the workflow.
 - [`src/mock_lab/io/README.md`](src/mock_lab/io/README.md): MAT loading, timing reconstruction, and sweep-cutting assumptions.
